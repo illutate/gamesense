@@ -1,0 +1,35 @@
+#include "skeet/esp/world_engine.hpp"
+
+namespace skeet::esp {
+WorldEngineOffsets::WorldEngineOffsets(const engine::NativeOffsetGlobals& g)
+    : origin{g, 0x43468D30, 0x43468ED4, 0x2A671B42, 0},
+      model_index{g, 0x43468978, 0x43468F7C, 0x47877DEB, 0},
+      owner_handle{g, 0x43467FCC, 0x43467938, 0x8D1BD8D0, 0},
+      definition{g, 0x4346908C, 0x43468BA0, 0x5C9F0FBB, 0},
+      ammunition{g, 0x4346A60C, 0x434678A8, 0xCA5EC698, 0},
+      reserve_ammunition{g, 0x4346749C, 0x43468C14, 0x49C770CA, 0},
+      team{g, 0x434688B0, 0x4346A518, 0x8B5586F6, 0},
+      hostage_effects{g, 0x43467634, 0x43468F2C, 0xBB78DC43, 0},
+      hostage_life_state{g, 0x434684FC, 0x43467D44, 0xCB6C59C2, 0},
+      studio_wrapper{g, 0x43467E8C, 0x43467900, 0x32E4DAF1, 0},
+      hitbox_set{g, 0x43468240, 0x4346A84C, 0xC2B6FB10, 0},
+      rules_allow_bomb{g, 0x4346921C, 0x43468F24, 0x82F5AD08, 0},
+      dropped_bomb_state{g, 0x43468F40, 0x4346A5B0, 0x71A5AC08, 0},
+      grenade_damage{g, 0x434674EC, 0x4346894C, 0x727317C4, 0},
+      grenade_radius{g, 0x4346A6A4, 0x43467120, 0x9D63BB7F, 0},
+      explosion_effect_tick{g, 0x43467210, 0x43467630, 0x01E80986, 0},
+      glow_index{g, 0x43469210, 0x4346A540, 0x442A38AE, 0},
+      smoke_active{g, 0x4346A530, 0x43467564, 0x58AE2423, 0},
+      smoke_start_tick{g, 0x43467AC0, 0x43468E60, 0xF267E956, 0},
+      inferno_start_tick{g, 0x43468DD4, 0x43467B40, 0x0DCBA89C, 0},
+      bomb_ticking{g, 0x4346A6C4, 0x43468EF4, 0x0E5BECE5, 0},
+      bomb_detonation_time{g, 0x4346834C, 0x4346A880, 0xD280D4E1, 0},
+      bomb_defuse_end{g, 0x4346A750, 0x4346A728, 0x800BB0B1, 0},
+      bomb_defuser_state{g, 0x4346A5F8, 0x43467B88, 0x950F7B20, 0},
+      bomb_origin{g, 0x434670CC, 0x43468BCC, 0xA9EE6062, 0},
+      bomb_site_first{g, 0x4346A71C, 0x43467DE0, 0xFCCAF99B, 0},
+      bomb_site_second{g, 0x43467C00, 0x43467C68, 0xE92192CA, 0},
+      view_offset{g, 0x43468A34, 0x43468C00, 0xC246315E, 0},
+      armor{g, 0x43467908, 0x434682E4, 0x47A6F50C, 0},
+      life_state{g, 0x43468E78, 0x434684E4, 0x9D920E35, 0} {}
+} // namespace skeet::esp

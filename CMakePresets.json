@@ -1,0 +1,46 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "native-core-x86",
+      "displayName": "Windows x86 Release",
+      "description": "Requires CMake, Ninja, Python 3.9+ and SKEET_LLVM_MINGW_ROOT pointing to LLVM-MinGW.",
+      "generator": "Ninja",
+      "architecture": {
+        "value": "Win32",
+        "strategy": "external"
+      },
+      "toolchainFile": "${sourceDir}/cmake/llvm-mingw-x86.cmake",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "native-core-x86",
+      "displayName": "Reviewed core for Windows x86",
+      "configurePreset": "native-core-x86",
+      "targets": [
+        "skeet_core"
+      ],
+      "jobs": 2
+    },
+    {
+      "name": "source-dll-x86",
+      "displayName": "Recovered source DLL for Windows x86",
+      "configurePreset": "native-core-x86",
+      "targets": [
+        "skeet_client",
+        "skeet_core_linkcheck"
+      ],
+      "jobs": 2
+    }
+  ]
+}

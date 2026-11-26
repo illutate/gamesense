@@ -1,0 +1,60 @@
+# Build outputs & CMake artifacts
+/build/
+/out/
+/CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+Makefile
+*.ninja
+.ninja_deps
+.ninja_log
+
+# Compiled binaries, objects, debug symbols
+*.dll
+*.exe
+*.lib
+*.a
+*.so
+*.dylib
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.idb
+*.pch
+*.ipdb
+*.iobj
+
+# Logs, crash dumps, temporary files
+*.log
+*.dmp
+*.mdmp
+*.tmp
+*.bak
+*.orig
+*~
+error.txt
+
+# IDEs & editors
+/.vs/
+/.vscode/
+/.idea/
+*.sln
+*.vcxproj*
+*.filters
+*.user
+*.suo
+
+# Python
+__pycache__/
+*.py[cod]
+/.venv/
+/venv/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,348 @@
+#include "skeet/network/tick_shift_runtime.hpp"
+#include "skeet/network/tick_shift_controls.hpp"
+#include "skeet/network/tick_shift_observers.hpp"
+#include "skeet/client/entity_command_owner.hpp"
+#include "skeet/client/prediction_history_owner.hpp"
+#include "skeet/engine/interface_call.hpp"
+#include <algorithm>
+#include <bit>
+#include <cstring>
+#include <limits>
+#include <immintrin.h>
+
+namespace skeet::network {
+namespace {
+template <class T> T field(const void* object, std::ptrdiff_t offset) noexcept {
+    T value;
+    std::memcpy(&value, static_cast<const std::byte*>(object) + offset, sizeof value);
+    return value;
+}
+template <class T> void store(void* object, std::ptrdiff_t offset, T value) noexcept {
+    std::memcpy(static_cast<std::byte*>(object) + offset, &value, sizeof value);
+}
+std::int32_t add(std::int32_t first, std::int32_t second) noexcept {
+    return std::bit_cast<std::int32_t>(std::uint32_t(first) + std::uint32_t(second));
+}
+std::int32_t sub(std::int32_t first, std::int32_t second) noexcept {
+    return std::bit_cast<std::int32_t>(std::uint32_t(first) - std::uint32_t(second));
+}
+void force_send(std::uint32_t& flags) noexcept {
+    flags = (flags & ~0x400U) | 0x200U;
+}
+std::int32_t time_ticks(float time, float interval) noexcept {
+    return _mm_cvttss_si32(
+        _mm_add_ss(_mm_div_ss(_mm_set_ss(time), _mm_set_ss(interval)), _mm_set_ss(0.5f)));
+}
+std::int32_t process_ticks(const TickShiftRuntimeSettings& settings, float interval) noexcept {
+    auto time =
+        _mm_div_ss(_mm_cvtepi32_ps(_mm_cvtsi32_si128(settings.process_milliseconds_43468290)),
+                   _mm_set_ss(1000.0f));
+    time = _mm_min_ss(_mm_max_ss(time, _mm_setzero_ps()), _mm_set_ss(1.0f));
+    return _mm_cvttss_si32(_mm_add_ss(_mm_div_ss(time, _mm_set_ss(interval)), _mm_set_ss(0.5f)));
+}
+std::int32_t available_commands(const TickShiftState& state, std::int32_t choked) noexcept {
+    auto available = (std::min)(sub(sub(state.budget, choked), 1), state.available);
+    for (std::int32_t i = 0; i < state.history_count; ++i)
+        available =
+            (std::min)(available, state.history[(state.history_first + std::uint32_t(i)) & 7U]);
+    return available;
+}
+std::int32_t history_available(const TickShiftState& state) noexcept {
+    auto available = state.available;
+    for (std::int32_t i = 0; i < state.history_count; ++i)
+        available =
+            (std::min)(available, state.history[(state.history_first + std::uint32_t(i)) & 7U]);
+    return available;
+}
+bool classified_weapon(const TickShiftRuntimeBindings& bindings, void* weapon) noexcept {
+    return weapon && classified_packet_weapon(
+                         field<std::uint16_t>(weapon, bindings.firing.offsets.weapon_definition),
+                         bindings.weapon_classification);
+}
+bool shot_window(const TickShiftState& state, const TickShiftRuntimeBindings& bindings) noexcept {
+    const auto now = time_ticks(*bindings.current_time, *bindings.tick_interval);
+    return add(now, 2) <= state.shot_tick && sub(state.shot_tick, now) < 16;
+}
+void flush(TickShiftRuntimeState& runtime, const client::Command& command,
+           std::uint32_t& flags) noexcept {
+    runtime.network.flags &= ~0x12U;
+    runtime.last_flush_command_134 = command.number;
+    force_send(flags);
+}
+void select_mode(TickShiftState& state, void* player, const TickShiftRuntimeSettings& settings,
+                 const TickShiftRuntimeBindings& bindings, const std::uint32_t& command_flags) {
+    void* rules = bindings.game_rules ? *bindings.game_rules : nullptr;
+    const auto& offsets = bindings.offsets;
+    const bool rule0 = rules && field<std::uint8_t>(rules, offsets.rule_bf567619);
+    const bool rule1 = rule0 && field<std::uint8_t>(rules, offsets.rule_dda99ab5);
+    const auto rule_mode = rule1 ? field<std::int32_t>(rules, offsets.rule_b7ea8fda) : 0;
+    const auto budget = network_command_budget(rules != nullptr, rule0, rule1, rule_mode,
+                                               settings.configured_budget_43469274);
+    state.mode = 0;
+    state.budget = budget;
+    state.minimum = sub(budget, 1);
+    if (!engine::invoke<bool>(bindings.engine_client, 26) || !bindings.checksum || state.budget < 7)
+        return;
+    const auto freeze_rules = bindings.game_rules ? *bindings.game_rules : nullptr;
+    if (freeze_rules && field<std::uint8_t>(freeze_rules, bindings.firing.offsets.rule_d720aea6) &&
+        bindings.freeze_entity_43475b74 &&
+        field<std::int32_t>(bindings.freeze_entity_43475b74, 0x20) > 1)
+        return;
+    if (field<std::uint8_t>(player, offsets.player_block_9d920e35))
+        return;
+    if ((command_flags & 0x40U) ||
+        hotkey_active(settings.command_block, tick_shift_control_keys(settings)) ||
+        (command_flags & 0x100U))
+        return;
+    if (tick_shift_control_active(settings, TickShiftControl::fake_peek))
+        state.mode = 3;
+    else if (tick_shift_control_active(settings, TickShiftControl::double_tap))
+        state.mode = 1;
+    else if (tick_shift_control_active(settings, TickShiftControl::on_shot))
+        state.mode = 2;
+    else
+        return;
+    state.minimum = (std::max)(1, tick_shift_fake_lag_setting(settings));
+    state.limit = std::clamp(sub(sub(state.budget, tick_shift_fake_lag_setting(settings)), 1), 1, 15);
+    if (state.mode == 2)
+        state.flags &= ~1U;
+}
+void copy_snapshot(TickShiftRuntimeBindings& bindings, std::uint32_t previous, std::uint32_t next) {
+    //433671B7 reads the owner after the checksum callback on each clone.
+    if (auto* const owner = bindings.prediction_snapshots_owner)
+        client::copy_prediction_snapshot(*owner, std::bit_cast<std::int32_t>(previous),
+                                         std::bit_cast<std::int32_t>(next));
+}
+void adjust_prediction_history(TickShiftRuntimeBindings& bindings,
+                               client::EntityCommandOwner* stamp_owner, std::int32_t command,
+                               std::int32_t tick) {
+    if (stamp_owner)
+        stamp_owner->state.prediction_stamp = *bindings.history_stamp_4346a334;
+    const auto last_command = add(add(*bindings.last_outgoing, 1), *bindings.choked_commands);
+    for (std::int32_t count = 0; count < 150; ++count, command = add(command, 1)) {
+        if (last_command < command)
+            break;
+        //433952F0 reloads43475898 for every lookup; the stamp owner above is
+        //separately captured by its caller and need not be that current owner.
+        auto* const owner = bindings.prediction_history_owner;
+        if (!owner)
+            break;
+        auto& entry = owner->state.history[command % 150];
+        if (entry.command_number != command)
+            break;
+        entry.state.flags |= 8U;
+        store(&entry.state, 0, tick);
+        const auto& input = bindings.commands[std::uint32_t(command) % 150];
+        if (input.number != command)
+            break;
+        if (input.tick != 0x7F7FFFFF) {
+            tick = add(tick, 1);
+            store(&entry.state, 0, tick);
+        }
+    }
+    store<std::int32_t>(bindings.prediction, 0xC, -1);
+    store<std::int32_t>(bindings.prediction, 0x1C, 0);
+    store<std::int32_t>(bindings.prediction, 0x24, 1);
+}
+void transition(TickShiftRuntimeState& runtime, client::CommandFrame& frame, void* player,
+                client::Command& command, bool shifting, std::int32_t pending,
+                const TickShiftRuntimeSettings& settings, TickShiftRuntimeBindings& bindings) {
+    auto& state = runtime.network;
+    const auto latency = average_latency_ticks(bindings.timing.latency);
+    const auto adjusted = adjusted_command_tick(
+        bindings.timing.command_tick, bindings.timing.have_ack, bindings.timing.acknowledged,
+        bindings.timing.have_sent, bindings.timing.sent);
+    const auto process = process_ticks(settings, *bindings.tick_interval);
+    auto number = add(*bindings.last_outgoing, 1);
+    if (shifting) {
+        const auto tick = add(add(add(sub(process, pending), 1), latency), adjusted);
+        auto& stored = runtime.command_ticks[number % 150];
+        if (stored.command != number) {
+            auto* const stamp_owner = bindings.prediction_history_owner;
+            stored = {number, tick};
+            adjust_prediction_history(bindings, stamp_owner, number, tick);
+            const auto tick_base = add(*bindings.choked_commands, tick);
+            store(&frame, 0xC8, tick_base);
+            store(player, bindings.offsets.tick_base_3d10b94c, tick_base);
+        }
+    } else {
+        const auto tick = add(add(latency, adjusted), sub(process, *bindings.choked_commands));
+        //4336727E saves this owner for both stamp writes, including433673E4.
+        auto* const stamp_owner = bindings.prediction_history_owner;
+        runtime.command_ticks[number % 150] = {number, tick};
+        adjust_prediction_history(bindings, stamp_owner, number, tick);
+        if (!(frame.flags & 0x20000000U)) {
+            state.shot_tick = add(*bindings.choked_commands, tick);
+            runtime.transition_command_110 = command.number;
+        }
+        const auto tick_base = add(*bindings.choked_commands, tick);
+        store(&frame, 0xC8, tick_base);
+        store(player, bindings.offsets.tick_base_3d10b94c, tick_base);
+        if (state.mode != 0 && !(state.flags & 0x80U)) {
+            const auto restored_tick = add(field<std::int32_t>(&frame, 0xCC), 1);
+            number = add(command.number, 1);
+            runtime.command_ticks[number % 150] = {number, restored_tick};
+            adjust_prediction_history(bindings, stamp_owner, number, restored_tick);
+        }
+    }
+    *bindings.current_time =
+        float(field<std::int32_t>(player, bindings.offsets.tick_base_3d10b94c)) *
+        *bindings.tick_interval;
+    //433674CF..433674ED captures the actual registry and calls every slot2.
+    //Their bodies are genuine RET8, but the native traversal remains present.
+    bindings.recharge_observers.notify_cloned(player, command);
+}
+}
+
+void process_tick_shift_runtime(TickShiftRuntimeState& runtime, client::CommandFrame& frame,
+                             void* player, void* weapon, client::Command& command,
+                             std::uint8_t& send_packet, const TickShiftRuntimeSettings& settings,
+                             TickShiftRuntimeBindings& bindings, std::uint32_t& flags) {
+    auto& state = runtime.network;
+    const bool previous_shift = state.last_command == *bindings.last_outgoing;
+    auto pending = pending_tick_shift_commands(state, *bindings.choked_commands);
+    select_mode(state, player, settings, bindings, flags);
+    bool shifting = false;
+    if (state.mode == 0) {
+        if (state.available > 0) {
+            state.minimum = (std::max)(1, tick_shift_fake_lag_setting(settings));
+            state.flags |= 9U;
+            shifting = true;
+        }
+    } else {
+        if (state.available < state.limit)
+            flags &= ~0x100000U;
+        else if (flags & 0x100000U) {
+            flags &= ~0x100000U;
+            state.flags |= 8U;
+        }
+        if (settings.special_weapon_43467560 && state.available >= state.limit) {
+            if (command.weapon_select == 0 && weapon && frame.weapon_kind_124 == 9 &&
+                !(command.movement.buttons & 0x801U) &&
+                !field<std::uint8_t>(weapon, bindings.offsets.weapon_byte_e1df7e9b) &&
+                field<float>(weapon, bindings.offsets.weapon_time_3b93667b) > 0.0f &&
+                field<std::uint8_t>(weapon, bindings.offsets.weapon_byte_e865a877)) {
+                state.flags |= 0x40U;
+                force_send(flags);
+            }
+            if ((state.flags & 0x40U) && *bindings.choked_commands != 0) {
+                send_packet = 1;
+                flush(runtime, command, flags);
+            }
+        }
+        const auto previous_low_health = runtime.low_health_120;
+        auto health_steps = (std::numeric_limits<std::int32_t>::max)();
+        if (bindings.shared_player_43475808 && settings.health_divisor_4346db30 >= 1) {
+            const auto health = field<std::int32_t>(bindings.shared_player_43475808,
+                                                    bindings.offsets.player_health_9bb80163);
+            health_steps = (std::max)(1, add(sub(health, 1), settings.health_divisor_4346db30) /
+                                             settings.health_divisor_4346db30);
+        }
+        const auto& move = frame.previous_command.movement;
+        const float magnitude =
+            (move.forward_move * move.forward_move + move.side_move * move.side_move) +
+            move.up_move * move.up_move;
+        if (state.mode == 1 && state.available >= state.limit &&
+            tick_shift_double_tap_setting(settings) == 1 &&
+            (classified_weapon(bindings, weapon) || frame.weapon_kind_124 == 9 ||
+             frame.weapon_kind_124 == 0) &&
+            frame.weapon_id_d8 != 64 && !previous_low_health && health_steps < 6 &&
+            !(state.flags & 8U) && !(command.movement.buttons & 0x801U) &&
+            (frame.scalar_c0 > 2.0f || magnitude > 16.0f) &&
+            runtime.last_flush_command_134 < *bindings.command_ack && !shot_window(state, bindings))
+            flush(runtime, command, flags);
+        runtime.low_health_120 = health_steps < 6;
+        if (state.mode == 1) {
+            const bool selected_matches =
+                !command.weapon_select || !weapon ||
+                command.weapon_select ==
+                    engine::invoke<std::int32_t>(static_cast<std::byte*>(weapon) + 8, 10);
+            if (selected_matches &&
+                (classified_weapon(bindings, weapon) || frame.weapon_kind_124 == 0)) {
+                auto firing = bindings.firing;
+                firing.game_rules = bindings.game_rules;
+                firing.current_time = bindings.current_time;
+                const auto fire =
+                    skeet::weapon::evaluate_fire_state(firing, player, weapon, command);
+                if (fire.burst_ready || (fire.primary_ready && (command.movement.buttons & 1U)) ||
+                    (fire.secondary_ready && (command.movement.buttons & 0x800U) &&
+                     (frame.weapon_id_d8 == 64 || frame.weapon_kind_124 == 0))) {
+                    if (!(frame.flags & 0x100000U) && frame.weapon_id_d8 != 31 &&
+                        state.available >= state.limit) {
+                        state.shot_command =
+                            sub(add(frame.command_number_ac,
+                                    available_commands(state, *bindings.choked_commands)),
+                                1);
+                        state.flags |= 8U;
+                        if (frame.flags & 0x20000000U) {
+                            state.flags = (state.flags & ~1U) | 8U;
+                            force_send(flags);
+                        } else if ((frame.weapon_id_d8 == 64 && (command.movement.buttons & 1U)) ||
+                                   (tick_shift_double_tap_setting(settings) == 1 &&
+                                    shot_window(state, bindings))) {
+                            state.flags = (state.flags & ~1U) | 8U;
+                            send_packet = 1;
+                            flags = (flags & ~0x200U) | 0x400U;
+                        }
+                    }
+                    state.timer_124 = 0.5f;
+                }
+            }
+            if (state.available >= state.limit && tick_shift_double_tap_setting(settings) == 1 &&
+                frame.weapon_id_d8 != 64 && (state.flags & 8U) && (flags & 0x20000U) &&
+                shot_window(state, bindings)) {
+                state.flags &= ~1U;
+                force_send(flags);
+            }
+        }
+        if (state.mode != 0 && state.available >= state.limit && (flags & 0x80000U)) {
+            flags &= ~0x80000U;
+            state.flags |= 0x10U;
+        }
+        if (state.available >= state.limit && send_packet && (state.flags & 0x10U) &&
+            !(state.flags & 0x20U) && (state.flags & 4U) && frame.weapon_id_d8 != 64 &&
+            frame.weapon_kind_124 != 9) {
+            if (!(frame.flags & 0x20000000U) &&
+                runtime.last_flush_command_134 < *bindings.command_ack)
+                flush(runtime, command, flags);
+        }
+        if (frame.flags & 0x20000000U)
+            state.flags = (state.flags & ~0x13U) | 8U;
+        if (state.available >= state.limit && send_packet) {
+            if ((state.flags & 9U) == 9U)
+                shifting = true;
+            else if (state.flags & 2U) {
+                const auto available = history_available(state);
+                const auto maximum =
+                    (std::min)(state.budget, add(add(available, 1), *bindings.choked_commands));
+                const auto count = sub(state.budget, *bindings.choked_commands);
+                auto number = std::uint32_t(command.number);
+                for (std::int32_t i = 0; i < count; ++i) {
+                    ++number;
+                    auto& output = bindings.commands[number % 150];
+                    if (&output != &command)
+                        output = command;
+                    output.number = std::bit_cast<std::int32_t>(number);
+                    output.tick = 0x7F7FFFFF;
+                    output.movement.buttons |= command.movement.buttons & 0x420024U;
+                    output.predicted = 1;
+                    client::save_final_command(output);
+                    auto& verified = bindings.verified_commands[number % 150];
+                    if (&verified.command != &output)
+                        verified.command = output;
+                    verified.checksum = bindings.checksum ? bindings.checksum(&output) : 0;
+                    *bindings.choked_commands = add(*bindings.choked_commands, 1);
+                    copy_snapshot(bindings, std::uint32_t(command.number), number);
+                }
+                runtime.generated_commands[std::uint32_t(command.number) % 150] = command.number;
+                state.last_command = command.number;
+                send_packet = 1;
+                pending = (std::min)(add(*bindings.choked_commands, 1), maximum);
+                shifting = true;
+            }
+        }
+    }
+    if (send_packet && shifting != previous_shift)
+        transition(runtime, frame, player, command, shifting, pending, settings, bindings);
+}
+} // namespace skeet::network
