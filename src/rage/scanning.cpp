@@ -28,9 +28,7 @@ std::vector<RageAimPoint> descriptors(const ScanContext& context, const ScanPoli
     std::vector<RageAimPoint> result;
     result.reserve(48);
     for (const auto index : order) {
-        const auto regular =
-            generate_rage_regular_hitbox_points(settings, index, local.hitboxes, geometry.primary);
-        result.insert(result.end(), regular.begin(), regular.end());
+        append_rage_regular_hitbox_points(result, settings, index, local.hitboxes, geometry.primary);
         const auto& hitbox = geometry.primary[index];
         const auto group = index == 11 || index == 12
                                ? 0x200U

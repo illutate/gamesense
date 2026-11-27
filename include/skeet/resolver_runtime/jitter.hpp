@@ -60,4 +60,5 @@ struct JitterTracking {
     const JitterRecordEvidence* find(const lagcomp::LagRecordHeader&) const noexcept;
 };
 void correct_jitter_history(lagcomp::RecordRing&, JitterTracking&) noexcept;
+bool detect_jitter_oscillation(const lagcomp::RecordRing&, float maximum_yaw) noexcept;
 } // namespace skeet::resolver_runtime

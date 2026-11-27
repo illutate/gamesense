@@ -123,16 +123,34 @@ void GrenadeLiveScene::Storage::update(GrenadeWarningOwner& owner, const Grenade
         if (squared(difference(prediction.position, record.position)) > 4096.0f)
             record.position = prediction.position;
     }
+    std::erase_if(smoke_handles, [&](std::uint32_t handle) {
+        auto* entity = handle == 0xffffffffu ? nullptr : raw.by_handle(handle);
+        return !entity || raw.dormant(entity) ||
+               (field<std::uint32_t>(entity, o.effects) & 0x20u) ||
+               raw.client_class(entity) != raw.bindings().smoke_projectile_class;
+    });
+    auto track_smoke = [&](void* entity) {
+        if (!entity || !raw.bindings().smoke_projectile_class ||
+            raw.client_class(entity) != raw.bindings().smoke_projectile_class)
+            return false;
+        const auto handle = *engine::invoke<const std::uint32_t*>(entity, 2);
+        if (handle != 0xffffffffu &&
+            std::find(smoke_handles.begin(), smoke_handles.end(), handle) == smoke_handles.end())
+            smoke_handles.push_back(handle);
+        return true;
+    };
     auto try_add_entity = [&](std::int32_t ent_idx) {
         if (ent_idx <= 64)
             return;
         const auto index_u = static_cast<std::uint32_t>(ent_idx);
-        for (const auto& record : owner.records)
-            if ((record.handle == 0xffffffffu ? 0x1fffu : record.handle & 0xfffu) == index_u)
-                return;
         auto* entity = raw.by_index(ent_idx);
         if (!entity || raw.dormant(entity) || (field<std::uint32_t>(entity, o.effects) & 0x20u))
             return;
+        if (track_smoke(entity))
+            return;
+        for (const auto& record : owner.records)
+            if ((record.handle == 0xffffffffu ? 0x1fffu : record.handle & 0xfffu) == index_u)
+                return;
         const auto klass = raw.client_class(entity);
         std::uint32_t type = 0;
         GrenadeKind kind = GrenadeKind::explosive;
@@ -220,7 +238,11 @@ void GrenadeLiveScene::Storage::update(GrenadeWarningOwner& owner, const Grenade
             try_add_entity(std::bit_cast<std::int32_t>(index_u));
         }
     }
-    if (raw.bindings().entity_list) {
+    const bool full_scan_due =
+        (b.tick_count - last_entity_scan_tick >= 8) || (b.tick_count < last_entity_scan_tick);
+    if (full_scan_due && raw.bindings().entity_list) {
+        last_entity_scan_tick = b.tick_count;
+        last_smoke_scan_tick = b.tick_count;
         const auto highest =
             std::clamp(engine::invoke<std::int32_t>(raw.bindings().entity_list, 6), 64, 4096);
         for (std::int32_t ent_idx = 65; ent_idx <= highest; ++ent_idx)

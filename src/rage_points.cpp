@@ -92,24 +92,22 @@ generate_rage_regular_points(const RagePointGeneration& settings,
                              std::span<const RageLocalHitbox, 19> local,
                              std::span<const RageScanHitbox, 19> hitboxes) {
     std::vector<RageAimPoint> result;
-    for (const auto index : order) {
-        const auto points = generate_rage_regular_hitbox_points(settings, index, local, hitboxes);
-        result.insert(result.end(), points.begin(), points.end());
-    }
+    result.reserve(48);
+    for (const auto index : order)
+        append_rage_regular_hitbox_points(result, settings, index, local, hitboxes);
     return result;
 }
 
-std::vector<RageAimPoint>
-generate_rage_regular_hitbox_points(const RagePointGeneration& settings, std::uint32_t index,
-                                    std::span<const RageLocalHitbox> local,
-                                    std::span<const RageScanHitbox> hitboxes) {
-    std::vector<RageAimPoint> result;
+void append_rage_regular_hitbox_points(std::vector<RageAimPoint>& result,
+                                       const RagePointGeneration& settings, std::uint32_t index,
+                                       std::span<const RageLocalHitbox> local,
+                                       std::span<const RageScanHitbox> hitboxes) {
     if (index >= local.size() || index >= hitboxes.size())
-        return result;
+        return;
     const auto group_bit =
         index == 11 || index == 12 ? 0x200u : 1u << (std::uint32_t(local[index].hitgroup) & 31u);
     if (!(settings.regular_mask & group_bit))
-        return result;
+        return;
     const auto& hitbox = hitboxes[index];
     const auto center = midpoint(hitbox.capsule);
     RageAimPoint primary{center, 0.0f, local[index].hitgroup, 0};
@@ -120,19 +118,27 @@ generate_rage_regular_hitbox_points(const RagePointGeneration& settings, std::ui
             primary.position =
                 interpolate(center, support(hitbox.capsule, {0.0f, 0.0f, 1.0f}, true), 0.6f);
     }
-    std::vector<RageAimPoint> extra;
-    if (settings.multipoint_mask & group_bit) {
-        const auto basis = point_basis(center, settings.origin);
-        if (hitbox.capsule.radius > 0.0f)
-            capsule_points(extra, hitbox, hitboxes[6].capsule, settings.origin, basis);
-        else
-            box_points(extra, local[index], hitbox, settings.origin, basis);
-        scale_points(extra, center, settings);
-    }
     if (hitbox.hitgroup == 3)
         primary.position = interpolate(primary.position, midpoint(hitboxes[2].capsule), 0.5f);
     result.push_back(primary);
-    result.insert(result.end(), extra.begin(), extra.end());
+    if (settings.multipoint_mask & group_bit) {
+        const auto extra_start = result.size();
+        const auto basis = point_basis(center, settings.origin);
+        if (hitbox.capsule.radius > 0.0f)
+            capsule_points(result, hitbox, hitboxes[6].capsule, settings.origin, basis);
+        else
+            box_points(result, local[index], hitbox, settings.origin, basis);
+        scale_points_from(result, extra_start, center, settings);
+    }
+}
+
+std::vector<RageAimPoint>
+generate_rage_regular_hitbox_points(const RagePointGeneration& settings, std::uint32_t index,
+                                    std::span<const RageLocalHitbox> local,
+                                    std::span<const RageScanHitbox> hitboxes) {
+    std::vector<RageAimPoint> result;
+    result.reserve(4);
+    append_rage_regular_hitbox_points(result, settings, index, local, hitboxes);
     return result;
 }
 } // namespace skeet

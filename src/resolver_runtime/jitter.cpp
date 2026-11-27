@@ -144,4 +144,46 @@ void correct_jitter_history(lagcomp::RecordRing& history, JitterTracking& tracki
         tracking.remember(evidence);
     }
 }
+bool detect_jitter_oscillation(const lagcomp::RecordRing& history, float maximum_yaw) noexcept {
+    if (history.count < 3 || history.count > history.records.size() ||
+        !std::isfinite(maximum_yaw) || maximum_yaw <= 0.0f)
+        return false;
+    const float swing_threshold = std::max(25.0f, maximum_yaw * 0.7f);
+    const std::uint32_t sample_limit = std::min<std::uint32_t>(history.count, 4u);
+    float prev_eye = 0.0f, prev_desync = 0.0f, prev_eye_step = 0.0f;
+    bool have_prev = false, have_eye_step = false;
+    std::array<float, 3> prev_origin{};
+    for (std::uint32_t age = 0; age < sample_limit; ++age) {
+        const auto& header = history.at(age).header;
+        if (age > 0 && (header.flags & 0x200u))
+            break;
+        const float eye = std::bit_cast<float>(header.player_history_1ac);
+        const float anchor = std::bit_cast<float>(header.player_history_180);
+        if (!std::isfinite(eye) || !std::isfinite(anchor))
+            return false;
+        const float desync = std::remainder(anchor - eye, 360.0f);
+        if (have_prev) {
+            float d2 = 0.0f;
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                const float d = prev_origin[axis] - header.origin[axis];
+                d2 += d * d;
+            }
+            if (!std::isfinite(d2) || d2 > 4096.0f)
+                break;
+            if ((prev_desync * desync) < 0.0f && std::fabs(prev_desync - desync) >= swing_threshold)
+                return true;
+            const float eye_step = std::remainder(prev_eye - eye, 360.0f);
+            if (have_eye_step && (prev_eye_step * eye_step) < 0.0f &&
+                std::min(std::fabs(prev_eye_step), std::fabs(eye_step)) >= swing_threshold)
+                return true;
+            prev_eye_step = eye_step;
+            have_eye_step = true;
+        }
+        prev_eye = eye;
+        prev_desync = desync;
+        prev_origin = header.origin;
+        have_prev = true;
+    }
+    return false;
+}
 } // namespace skeet::resolver_runtime

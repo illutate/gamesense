@@ -29,6 +29,8 @@ void initialize_global_settings(ConfigRegistries& r, GlobalSettings& c) noexcept
     initialize_boolean_config(d, c.reduce_aim_step, 0x4034958C);
     initialize_integer_config(d, c.aim_step_limit, 0x20E889DE, 15);
     initialize_boolean_config(d, c.pattern_recoil_correction, 0xA434F7C7);
+    initialize_boolean_config(d, c.jitter_fix, 0x8C2E9D71u);
+    c.jitter_fix.value = 1;
     initialize_boolean_config(d, c.experimental_rage, experimental_rage_hash);
     c.experimental_rage.value = 1;
     for (const auto option : active_experimental_rage_options) {

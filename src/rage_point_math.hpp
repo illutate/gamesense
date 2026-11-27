@@ -3,7 +3,12 @@
 #include <cmath>
 
 namespace skeet::rage_point_detail {
-void scale_points(std::vector<RageAimPoint>&, const RageVector&, const RagePointGeneration&);
+void scale_points_from(std::vector<RageAimPoint>&, std::size_t start_index, const RageVector&,
+                       const RagePointGeneration&);
+inline void scale_points(std::vector<RageAimPoint>& points, const RageVector& center,
+                         const RagePointGeneration& settings) {
+    scale_points_from(points, 0, center, settings);
+}
 constexpr float epsilon = 0x1p-23f;
 inline RageVector subtract(const RageVector& a, const RageVector& b) noexcept {
     return {a[0] - b[0], a[1] - b[1], a[2] - b[2]};

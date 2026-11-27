@@ -237,6 +237,9 @@ struct BannerMeta {
 
 struct HitlogBanner {
     std::vector<BannerPart> parts;
+    std::vector<std::int32_t> part_widths;
+    std::int32_t total_text_w = 0;
+    std::int32_t measured_dpi_idx = -1;
     std::uint32_t accent_abgr = 0xFFFFFFFFu;
     float time = 0.0f;
     float reveal_from = 0.0f;
@@ -306,9 +309,25 @@ struct EnhancedFeaturesRuntime::Impl {
     float custom_scope_alpha = 0.0f;
     float last_scope_time = 0.0f;
     std::string cached_username;
+    std::u16string cached_username_u16;
+    std::int32_t cached_username_w = 0;
+    std::int32_t cached_username_dpi = -1;
+    float username_poll_timer = -10.0f;
+    std::int32_t last_local_idx = -1;
 
+    void* cvar_aspect = nullptr;
+    void* cvar_tp_dist = nullptr;
+    void* cvar_vm_fov = nullptr;
+    void* cvar_vm_x = nullptr;
+    void* cvar_vm_y = nullptr;
+    void* cvar_vm_z = nullptr;
+
+    std::atomic<bool> has_banners{false};
     std::mutex mutex;
     std::deque<HitlogBanner> banners;
+    std::vector<HitlogBanner> banner_snapshot;
+    std::int32_t cached_banner_text_h = 0;
+    std::int32_t cached_banner_dpi = -1;
     std::unordered_map<std::int32_t, AimFireRecord> fire_cache;
     struct NativeHitStamp {
         std::int32_t target = 0;
@@ -318,7 +337,7 @@ struct EnhancedFeaturesRuntime::Impl {
     };
     std::deque<NativeHitStamp> recent_native_hits;
 
-    // Watermark metrics
+    // Watermark metrics & reusable caches (avoid per-frame heap/measure_text overhead)
     std::uint32_t fps_accum = 0;
     std::int32_t fps_value = 0;
     std::int32_t fps_prev = 0;
@@ -334,6 +353,59 @@ struct EnhancedFeaturesRuntime::Impl {
     AnimState var_anim{};
     AnimState speed_anim{};
     bool connected_state = false;
+
+    std::int32_t wm_dpi = -1;
+    std::int32_t wm_game_w = 0;
+    std::int32_t wm_sense_w = 0;
+    std::int32_t wm_fps_lbl_w = 0;
+    std::int32_t wm_var_lbl_w = 0;
+    std::int32_t wm_ping_lbl_w = 0;
+    std::int32_t wm_speed_lbl_w = 0;
+    std::int32_t wm_kd_lbl_w = 0;
+    std::int32_t wm_text_h = 0;
+
+    std::int32_t wm_fps_val = -1;
+    std::u16string wm_fps_u16;
+    std::int32_t wm_fps_w = 0;
+
+    std::int32_t wm_var_val = -1;
+    std::u16string wm_var_u16;
+    std::int32_t wm_var_w = 0;
+
+    std::int32_t wm_ping_val = -1;
+    std::u16string wm_ping_u16;
+    std::int32_t wm_ping_w = 0;
+
+    std::int32_t wm_speed_val = -1;
+    std::u16string wm_speed_u16;
+    std::int32_t wm_speed_w = 0;
+
+    std::string wm_server_raw;
+    std::u16string wm_server_u16;
+    std::int32_t wm_server_w = 0;
+    std::int32_t wm_server_dpi = -1;
+
+    std::int32_t wm_kd_kills = -1;
+    std::int32_t wm_kd_deaths = -1;
+    std::u16string wm_kd_u16;
+    std::int32_t wm_kd_w = 0;
+
+    WORD wm_clock_sec = 0xFFFFu;
+    float wm_clock_timer = -10.0f;
+    std::u16string wm_clock_u16;
+    std::int32_t wm_clock_w = 0;
+
+    struct WmElement {
+        std::u16string_view text;
+        std::uint32_t color = 0xDCFFFFFFu;
+        std::uint32_t flags = 8;
+        std::int32_t off_x = 0;
+        std::int32_t off_y = 0;
+        std::int32_t pad_after = 0;
+        std::int32_t full_w = 0;
+        std::int32_t clip_w = 0; // <=0 means full width
+    };
+    std::vector<WmElement> wm_elems;
 
     explicit Impl(EnhancedFeatureBindings bindings) : b(bindings) {
         const auto& g = b.offsets.globals;
@@ -357,6 +429,9 @@ struct EnhancedFeaturesRuntime::Impl {
             std::ptrdiff_t(engine::DecodedOffset(g, 0x43467D20u, 0x43468E8Cu, 0xD6A88AA5u, 0)));
         round_prestart_hash = events::event_hash("round_prestart");
         cached_username = query_default_username();
+        cached_username_u16 = utf8_to_u16(cached_username);
+        banner_snapshot.reserve(12);
+        wm_elems.reserve(24);
         fps_timer = var_timer = ping_timer = last_scope_time = mono_seconds();
     }
 
@@ -383,7 +458,9 @@ struct EnhancedFeaturesRuntime::Impl {
         const float now = mono_seconds();
         if (banners.size() >= 12)
             banners.pop_front();
-        banners.push_back({std::move(parts), abgr, now, 0.0f, now, std::move(meta)});
+        banners.push_back(
+            {std::move(parts), {}, 0, -1, abgr, now, 0.0f, now, std::move(meta)});
+        has_banners.store(true, std::memory_order_release);
     }
 
     void update_console_filter(bool enable) {
@@ -405,12 +482,13 @@ struct EnhancedFeaturesRuntime::Impl {
         last_screen_h = sh;
         if (!b.cvar)
             return;
-        auto* var = find_cvar(b.cvar, "r_aspectratio");
-        if (!var)
+        if (!cvar_aspect)
+            cvar_aspect = find_cvar(b.cvar, "r_aspectratio");
+        if (!cvar_aspect)
             return;
         const float val =
             (pct == 100 || sh <= 0) ? 0.0f : (static_cast<float>(sw) * (2.0f - pct * 0.01f)) / sh;
-        set_cvar_float(var, val);
+        set_cvar_float(cvar_aspect, val);
         DEBUG_LOG("ASPECT", "force_aspect_ratio=%d%% (%dx%d) -> r_aspectratio=%.4f", pct, sw, sh,
                   double(val));
     }
@@ -425,21 +503,25 @@ struct EnhancedFeaturesRuntime::Impl {
         if (dist == last_tp_distance)
             return;
         last_tp_distance = dist;
-        if (auto* var = find_cvar(b.cvar, "cam_idealdist"))
-            set_cvar_float(var, static_cast<float>(dist));
+        if (!cvar_tp_dist && b.cvar)
+            cvar_tp_dist = find_cvar(b.cvar, "cam_idealdist");
+        if (cvar_tp_dist)
+            set_cvar_float(cvar_tp_dist, static_cast<float>(dist));
     }
 
     void apply_viewmodel_cvars(float fov, float x, float y, float z) noexcept {
         if (!b.cvar)
             return;
-        const auto set_raw = [&](const char* name, float val) {
-            if (auto* var = find_cvar(b.cvar, name); var && !engine::invoke<bool>(var, 1))
-                script::set_cvar_raw_float(var, val);
+        const auto set_raw = [&](void*& cached, const char* name, float val) {
+            if (!cached)
+                cached = find_cvar(b.cvar, name);
+            if (cached && !engine::invoke<bool>(cached, 1))
+                script::set_cvar_raw_float(cached, val);
         };
-        set_raw("viewmodel_fov", fov);
-        set_raw("viewmodel_offset_x", x);
-        set_raw("viewmodel_offset_y", y);
-        set_raw("viewmodel_offset_z", z);
+        set_raw(cvar_vm_fov, "viewmodel_fov", fov);
+        set_raw(cvar_vm_x, "viewmodel_offset_x", x);
+        set_raw(cvar_vm_y, "viewmodel_offset_y", y);
+        set_raw(cvar_vm_z, "viewmodel_offset_z", z);
     }
 
     void update_viewmodel() {
@@ -468,8 +550,14 @@ struct EnhancedFeaturesRuntime::Impl {
     }
 
     void render_custom_scope(ui::RenderQueue& queue, std::int32_t sw, std::int32_t sh) {
+        if (!b.other_esp.overlays.custom_scope.value && custom_scope_alpha <= 0.001f) {
+            custom_scope_alpha = 0.0f;
+            last_scope_time = 0.0f;
+            return;
+        }
         const float now = mono_seconds();
-        const float dt = std::clamp(now - last_scope_time, 0.0f, 0.1f);
+        const float dt =
+            (last_scope_time > 0.0f) ? std::clamp(now - last_scope_time, 0.0f, 0.1f) : 0.0f;
         last_scope_time = now;
 
         if (!b.other_esp.overlays.custom_scope.value) {
@@ -532,9 +620,12 @@ struct EnhancedFeaturesRuntime::Impl {
         queue.text(sw / 2, y, clr, 0x10 | 0x20 | 4, 0, u"UNSAFE DT RECHARGE");
     }
 
-    void render_hitlogs(ui::RenderQueue& queue, float scale, bool low_dpi) {
+    void render_hitlogs(ui::RenderQueue& queue, float scale, std::int32_t dpi_idx) {
+        if (!b.hitlogs.enabled.value || !has_banners.load(std::memory_order_acquire))
+            return;
+
         const float now = mono_seconds();
-        std::vector<HitlogBanner> snapshot;
+        banner_snapshot.clear();
         {
             std::lock_guard lock(mutex);
             while (!banners.empty() && now - banners.front().time > 7.15f)
@@ -543,29 +634,41 @@ struct EnhancedFeaturesRuntime::Impl {
             std::erase_if(banners, [&](const HitlogBanner& item) {
                 return (now - item.time) > 7.15f;
             });
-            if (!b.hitlogs.enabled.value || banners.empty())
+            has_banners.store(!banners.empty(), std::memory_order_release);
+            if (banners.empty())
                 return;
-            snapshot.assign(banners.begin(), banners.end());
+            for (auto& item : banners) {
+                if (item.measured_dpi_idx != dpi_idx) {
+                    item.part_widths.clear();
+                    item.part_widths.reserve(item.parts.size());
+                    std::int32_t total_w = 0;
+                    for (const auto& part : item.parts) {
+                        const std::int32_t pw =
+                            part.text.empty() ? 0 : ui::measure_text(queue, part.text, 8).x;
+                        item.part_widths.push_back(pw);
+                        total_w += pw;
+                    }
+                    item.total_text_w = total_w;
+                    item.measured_dpi_idx = dpi_idx;
+                }
+            }
+            banner_snapshot.assign(banners.begin(), banners.end());
         }
 
-        const float factor = low_dpi ? 0.4f : 0.5f;
+        if (cached_banner_dpi != dpi_idx) {
+            cached_banner_text_h = ui::measure_text(queue, u"0", 8).y;
+            cached_banner_dpi = dpi_idx;
+        }
+        const float factor = (dpi_idx == 0) ? 0.4f : 0.5f;
         const std::int32_t padding = static_cast<std::int32_t>(std::round(16.0f * scale));
         const std::int32_t height = static_cast<std::int32_t>(std::ceil(20.0f * scale));
-        const std::int32_t text_h = ui::measure_text(queue, u"0", 8).y;
+        const std::int32_t text_h = cached_banner_text_h;
         const std::int32_t base_x = 10;
         std::int32_t base_y = 10;
 
-        for (auto it = snapshot.rbegin(); it != snapshot.rend(); ++it) {
+        for (auto it = banner_snapshot.rbegin(); it != banner_snapshot.rend(); ++it) {
             const auto& item = *it;
-            std::int32_t text_w = 0;
-            std::vector<std::int32_t> part_widths;
-            part_widths.reserve(item.parts.size());
-            for (const auto& part : item.parts) {
-                const std::int32_t pw =
-                    part.text.empty() ? 0 : ui::measure_text(queue, part.text, 8).x;
-                part_widths.push_back(pw);
-                text_w += pw;
-            }
+            const std::int32_t text_w = item.total_text_w;
             const float rev_elapsed = std::max(now - item.reveal_started, 0.0f);
             const float visible_w_f =
                 rev_elapsed >= 0.18f
@@ -602,23 +705,12 @@ struct EnhancedFeaturesRuntime::Impl {
                                                   : with_alpha(0x00FFFFFFu, soft_a);
                     queue.text(pen_x, text_y, clr, 8, 0, part.text);
                 }
-                pen_x += part_widths[idx];
+                pen_x += item.part_widths[idx];
             }
             queue.reset_bounds(false);
             base_y += height + 6;
         }
     }
-
-    struct WmElement {
-        std::u16string text;
-        std::uint32_t color = 0xDCFFFFFFu;
-        std::uint32_t flags = 8;
-        std::int32_t off_x = 0;
-        std::int32_t off_y = 0;
-        std::int32_t pad_after = 0;
-        std::int32_t full_w = 0;
-        std::int32_t clip_w = 0; // <=0 means full width
-    };
 
     static std::uint32_t stat_color(std::int32_t val, std::int32_t prev, std::int32_t warn,
                                     std::int32_t danger, std::int32_t spike_w,
@@ -662,33 +754,77 @@ struct EnhancedFeaturesRuntime::Impl {
         constexpr std::uint32_t white_text = 0xDCFFFFFFu;
         const std::int32_t small_y = (dpi_idx == 1) ? 1 : (dpi_idx == 2 || dpi_idx == 3) ? 4 : (dpi_idx >= 4) ? 5 : 2;
 
+        if (wm_dpi != dpi_idx) {
+            wm_dpi = dpi_idx;
+            wm_game_w = ui::measure_text(queue, u"game", 8).x;
+            wm_sense_w = ui::measure_text(queue, u"sense", 8).x;
+            wm_fps_lbl_w = ui::measure_text(queue, u"FPS", 4).x;
+            wm_var_lbl_w = ui::measure_text(queue, u"VAR", 4).x;
+            wm_ping_lbl_w = ui::measure_text(queue, u"PING", 4).x;
+            wm_speed_lbl_w = ui::measure_text(queue, u"SPEED", 4).x;
+            wm_kd_lbl_w = ui::measure_text(queue, u"K/D", 4).x;
+            wm_text_h = ui::measure_text(queue, u"0", 8).y;
+            wm_fps_val = -1;
+            wm_var_val = -1;
+            wm_ping_val = -1;
+            wm_speed_val = -1;
+            wm_kd_kills = -1;
+            wm_clock_sec = 0xFFFFu;
+        }
+        if (cached_username_dpi != dpi_idx) {
+            cached_username_w =
+                cached_username_u16.empty() ? 0 : ui::measure_text(queue, cached_username_u16, 8).x;
+            cached_username_dpi = dpi_idx;
+        }
+
         // Connection & net channel queries
         bool is_connected = false;
         bool is_local = false;
-        std::string server_addr;
+        const char* raw_addr = nullptr;
         float latency_sec = 0.0f;
+        std::int32_t local_idx = 0;
         if (b.engine && engine::invoke<bool>(b.engine, 26)) {
             if (auto* chan = engine::invoke<void*>(b.engine, 78)) {
                 const char* addr = engine::invoke<const char*>(chan, 1);
                 if (addr && *addr) {
                     is_connected = true;
-                    if (std::strcmp(addr, "loopback") == 0) {
+                    if (std::strcmp(addr, "loopback") == 0)
                         is_local = true;
-                        server_addr = "Local Server";
-                    } else {
-                        server_addr = addr;
-                    }
+                    else
+                        raw_addr = addr;
                     latency_sec = std::max(0.0f, engine::invoke<float>(chan, 10, 0));
                 }
             }
-            const std::int32_t local_idx = engine::invoke<std::int32_t>(b.engine, 12);
-            if (local_idx >= 1 && local_idx <= 64) {
+            local_idx = engine::invoke<std::int32_t>(b.engine, 12);
+            if (local_idx >= 1 && local_idx <= 64 &&
+                (local_idx != last_local_idx || now >= username_poll_timer + 2.0f ||
+                 now < username_poll_timer)) {
+                last_local_idx = local_idx;
+                username_poll_timer = now;
                 std::string live_name = resolve_player_name(local_idx);
-                if (live_name != "?")
+                if (live_name != "?" && live_name != cached_username) {
                     cached_username = std::move(live_name);
+                    cached_username_u16 = utf8_to_u16(cached_username);
+                    cached_username_w = cached_username_u16.empty()
+                                            ? 0
+                                            : ui::measure_text(queue, cached_username_u16, 8).x;
+                    cached_username_dpi = dpi_idx;
+                }
             }
         }
         connected_state = is_connected;
+
+        const std::string_view server_sv =
+            !is_connected ? std::string_view{}
+                          : (is_local ? std::string_view("Local Server")
+                                      : std::string_view(raw_addr ? raw_addr : ""));
+        if (!server_sv.empty() && (server_sv != wm_server_raw || wm_server_dpi != dpi_idx)) {
+            wm_server_raw.assign(server_sv);
+            wm_server_u16 =
+                is_local ? std::u16string(u"Local Server") : utf8_to_u16(wm_server_raw);
+            wm_server_w = ui::measure_text(queue, wm_server_u16, 8).x;
+            wm_server_dpi = dpi_idx;
+        }
 
         // FPS update (1s bucket)
         ++fps_accum;
@@ -704,8 +840,8 @@ struct EnhancedFeaturesRuntime::Impl {
             frametimes[frametime_idx] = b.globals->absolute_frame_time;
             frametime_idx = (frametime_idx + 1) % frametimes.size();
         }
-        std::int32_t current_var = 0;
-        {
+        if (now >= var_timer + 1.0f) {
+            std::int32_t current_var = 0;
             std::array<float, 64> sample{};
             std::size_t count = 0;
             float acc = 0.0f;
@@ -731,8 +867,6 @@ struct EnhancedFeaturesRuntime::Impl {
                 if (dev_ms >= 0.5f)
                     current_var = static_cast<std::int32_t>(std::floor(dev_ms + 0.5f));
             }
-        }
-        if (now >= var_timer + 1.0f) {
             var_timer = now;
             var_prev = var_value;
             var_value = current_var;
@@ -747,68 +881,81 @@ struct EnhancedFeaturesRuntime::Impl {
         }
 
         // Build watermark elements
-        std::vector<WmElement> elems;
-        elems.reserve(24);
+        wm_elems.clear();
         const std::int32_t brand_gap = static_cast<std::int32_t>(std::round(20.0f * scale));
         const std::int32_t stat_gap = static_cast<std::int32_t>(std::round(15.0f * scale));
-        auto push = [&](std::u16string txt, std::uint32_t clr, bool small = false, std::int32_t ox = 0,
-                        std::int32_t oy = 0, std::int32_t clip_w = 0) {
-            const std::uint32_t flags = small ? 4u : 8u;
-            const std::int32_t w = txt.empty() ? 0 : ui::measure_text(queue, txt, flags).x;
-            elems.push_back({std::move(txt), clr, flags, ox, oy, 0, w, clip_w});
+        auto push = [&](std::u16string_view txt, std::uint32_t clr, std::int32_t w,
+                        bool small = false, std::int32_t ox = 0, std::int32_t oy = 0,
+                        std::int32_t clip_w = 0) {
+            wm_elems.push_back({txt, clr, small ? 4u : 8u, ox, oy, 0, w, clip_w});
         };
         auto sep = [&](float frac = 1.0f) {
-            if (!elems.empty())
-                elems.back().pad_after +=
+            if (!wm_elems.empty())
+                wm_elems.back().pad_after +=
                     static_cast<std::int32_t>(std::round(static_cast<float>(stat_gap) * frac));
         };
 
         // Logo: game + sense (accent)
-        push(u"game", white_text);
-        push(u"sense", accent);
-        elems.back().pad_after = brand_gap;
+        push(u"game", white_text, wm_game_w);
+        push(u"sense", accent, wm_sense_w);
+        wm_elems.back().pad_after = brand_gap;
 
         // Username
-        push(utf8_to_u16(cached_username), white_text);
+        push(cached_username_u16, white_text, cached_username_w);
 
         // FPS
+        if (wm_fps_val != fps_value) {
+            wm_fps_val = fps_value;
+            wm_fps_u16 = utf8_to_u16(std::to_string(fps_value));
+            wm_fps_w = ui::measure_text(queue, wm_fps_u16, 8).x;
+        }
         sep();
-        push(utf8_to_u16(std::to_string(fps_value)),
-             stat_color(fps_value, fps_prev, 64, 45, 20, 40, true, accent));
-        push(u"FPS", white_text, true, 1, small_y);
+        push(wm_fps_u16, stat_color(fps_value, fps_prev, 64, 45, 20, 40, true, accent), wm_fps_w);
+        push(u"FPS", white_text, wm_fps_lbl_w, true, 1, small_y);
 
         // Frametime variance (animated reveal when var > 0)
         {
             const float prog = step_anim(var_anim, var_value > 0, 0.15f, now);
-            const auto vtext = utf8_to_u16(std::to_string(var_value));
-            const std::int32_t vw = ui::measure_text(queue, vtext, 8).x;
-            const std::int32_t lw = ui::measure_text(queue, u"VAR", 4).x;
-            const float anim_w = static_cast<float>(vw + 1 + lw) * prog;
-            if (anim_w > 1.0f) {
-                sep(prog);
-                const std::int32_t cw = static_cast<std::int32_t>(std::ceil(anim_w));
-                const std::int32_t vw_clip = prog >= 0.99f ? 0 : std::min(vw, cw) + 2;
-                const std::int32_t lw_clip =
-                    prog >= 0.99f ? 0 : std::max(0, cw - vw - 1);
-                push(vtext, stat_color(var_value, var_prev, 3, 6, 2, 4, false, accent), false, 0, 0,
-                     vw_clip);
-                if (prog >= 0.99f || lw_clip > 1)
-                    push(u"VAR", white_text, true, 1, small_y, lw_clip > 0 ? lw_clip + 2 : 0);
+            if (prog > 0.0f) {
+                if (wm_var_val != var_value) {
+                    wm_var_val = var_value;
+                    wm_var_u16 = utf8_to_u16(std::to_string(var_value));
+                    wm_var_w = ui::measure_text(queue, wm_var_u16, 8).x;
+                }
+                const std::int32_t vw = wm_var_w;
+                const std::int32_t lw = wm_var_lbl_w;
+                const float anim_w = static_cast<float>(vw + 1 + lw) * prog;
+                if (anim_w > 1.0f) {
+                    sep(prog);
+                    const std::int32_t cw = static_cast<std::int32_t>(std::ceil(anim_w));
+                    const std::int32_t vw_clip = prog >= 0.99f ? 0 : std::min(vw, cw) + 2;
+                    const std::int32_t lw_clip =
+                        prog >= 0.99f ? 0 : std::max(0, cw - vw - 1);
+                    push(wm_var_u16, stat_color(var_value, var_prev, 3, 6, 2, 4, false, accent),
+                         vw, false, 0, 0, vw_clip);
+                    if (prog >= 0.99f || lw_clip > 1)
+                        push(u"VAR", white_text, lw, true, 1, small_y, lw_clip > 0 ? lw_clip + 2 : 0);
+                }
             }
         }
 
         // Ping
         if (is_connected && !is_local) {
+            if (wm_ping_val != ping_value) {
+                wm_ping_val = ping_value;
+                wm_ping_u16 = utf8_to_u16(std::to_string(ping_value));
+                wm_ping_w = ui::measure_text(queue, wm_ping_u16, 8).x;
+            }
             sep();
-            push(utf8_to_u16(std::to_string(ping_value)),
-                 stat_color(ping_value, ping_prev, 70, 120, 25, 50, false, accent));
-            push(u"PING", white_text, true, 1, small_y);
+            push(wm_ping_u16, stat_color(ping_value, ping_prev, 70, 120, 25, 50, false, accent),
+                 wm_ping_w);
+            push(u"PING", white_text, wm_ping_lbl_w, true, 1, small_y);
         }
 
         // Server IP
-        if (is_connected && !server_addr.empty()) {
+        if (is_connected && !wm_server_u16.empty()) {
             sep();
-            push(utf8_to_u16(server_addr), white_text);
+            push(wm_server_u16, white_text, wm_server_w);
         }
 
         // Speed
@@ -820,56 +967,72 @@ struct EnhancedFeaturesRuntime::Impl {
                 spd = 0.0f;
             const std::int32_t spd_i = static_cast<std::int32_t>(spd);
             const float prog = step_anim(speed_anim, spd_i != 0, 0.15f, now);
-            const auto stext = utf8_to_u16(std::to_string(spd_i));
-            const std::int32_t sw = ui::measure_text(queue, stext, 8).x;
-            const std::int32_t lw = ui::measure_text(queue, u"SPEED", 4).x;
-            const float anim_w = static_cast<float>(sw + 1 + lw) * prog;
-            if (anim_w > 1.0f) {
-                sep(prog);
-                const std::int32_t cw = static_cast<std::int32_t>(std::ceil(anim_w));
-                const std::int32_t sw_clip = prog >= 0.99f ? 0 : std::min(sw, cw) + 2;
-                const std::int32_t lw_clip = prog >= 0.99f ? 0 : std::max(0, cw - sw - 1);
-                push(stext, white_text, false, 0, 0, sw_clip);
-                if (prog >= 0.99f || lw_clip > 1)
-                    push(u"SPEED", white_text, true, 1, small_y, lw_clip > 0 ? lw_clip + 2 : 0);
+            if (prog > 0.0f) {
+                if (wm_speed_val != spd_i) {
+                    wm_speed_val = spd_i;
+                    wm_speed_u16 = utf8_to_u16(std::to_string(spd_i));
+                    wm_speed_w = ui::measure_text(queue, wm_speed_u16, 8).x;
+                }
+                const std::int32_t sw = wm_speed_w;
+                const std::int32_t lw = wm_speed_lbl_w;
+                const float anim_w = static_cast<float>(sw + 1 + lw) * prog;
+                if (anim_w > 1.0f) {
+                    sep(prog);
+                    const std::int32_t cw = static_cast<std::int32_t>(std::ceil(anim_w));
+                    const std::int32_t sw_clip = prog >= 0.99f ? 0 : std::min(sw, cw) + 2;
+                    const std::int32_t lw_clip = prog >= 0.99f ? 0 : std::max(0, cw - sw - 1);
+                    push(wm_speed_u16, white_text, sw, false, 0, 0, sw_clip);
+                    if (prog >= 0.99f || lw_clip > 1)
+                        push(u"SPEED", white_text, lw, true, 1, small_y, lw_clip > 0 ? lw_clip + 2 : 0);
+                }
             }
         }
 
         // K/D Ratio
-        if (is_connected && b.local_player && b.player_resource && *b.player_resource && b.engine) {
-            const std::int32_t local_idx = engine::invoke<std::int32_t>(b.engine, 12);
-            if (local_idx >= 1 && local_idx <= 64) {
-                const auto* res = *b.player_resource;
-                const auto kills =
-                    read_mem<std::int32_t>(res, kills_offset + static_cast<std::uint32_t>(local_idx) * 4u);
-                const auto deaths =
-                    read_mem<std::int32_t>(res, deaths_offset + static_cast<std::uint32_t>(local_idx) * 4u);
-                if (kills > 0 || deaths > 0) {
+        if (is_connected && b.local_player && b.player_resource && *b.player_resource &&
+            local_idx >= 1 && local_idx <= 64) {
+            const auto* res = *b.player_resource;
+            const auto kills =
+                read_mem<std::int32_t>(res, kills_offset + static_cast<std::uint32_t>(local_idx) * 4u);
+            const auto deaths =
+                read_mem<std::int32_t>(res, deaths_offset + static_cast<std::uint32_t>(local_idx) * 4u);
+            if (kills > 0 || deaths > 0) {
+                if (wm_kd_kills != kills || wm_kd_deaths != deaths) {
+                    wm_kd_kills = kills;
+                    wm_kd_deaths = deaths;
                     const float kd =
                         deaths == 0 ? static_cast<float>(kills)
                                     : static_cast<float>(kills) / static_cast<float>(deaths);
                     char buf[32]{};
                     std::snprintf(buf, sizeof(buf), "%.1f", double(kd));
-                    sep();
-                    push(utf8_to_u16(buf), white_text);
-                    push(u"K/D", white_text, true, 1, small_y);
+                    wm_kd_u16 = utf8_to_u16(buf);
+                    wm_kd_w = ui::measure_text(queue, wm_kd_u16, 8).x;
                 }
+                sep();
+                push(wm_kd_u16, white_text, wm_kd_w);
+                push(u"K/D", white_text, wm_kd_lbl_w, true, 1, small_y);
             }
         }
 
-        // System clock (24h HH:MM:SS)
-        {
+        // System clock (24h HH:MM:SS, throttled polling)
+        if (now >= wm_clock_timer + 0.5f || now < wm_clock_timer || wm_clock_sec == 0xFFFFu) {
+            wm_clock_timer = now;
             SYSTEMTIME st{};
             GetLocalTime(&st);
-            char clk[16]{};
-            std::snprintf(clk, sizeof(clk), "%02u:%02u:%02u", st.wHour, st.wMinute, st.wSecond);
-            sep();
-            push(utf8_to_u16(clk), white_text);
+            if (st.wSecond != wm_clock_sec || wm_clock_u16.empty()) {
+                wm_clock_sec = st.wSecond;
+                char clk[16]{};
+                std::snprintf(clk, sizeof(clk), "%02u:%02u:%02u", st.wHour, st.wMinute, st.wSecond);
+                wm_clock_u16 = utf8_to_u16(clk);
+                wm_clock_w = ui::measure_text(queue, wm_clock_u16, 8).x;
+            }
         }
+        sep();
+        push(wm_clock_u16, white_text, wm_clock_w);
 
         // Measure total content width
         std::int32_t content_w = 0;
-        for (const auto& e : elems) {
+        for (const auto& e : wm_elems) {
             const std::int32_t w = (e.clip_w > 0) ? std::min(e.clip_w, e.full_w) : e.full_w;
             content_w += e.off_x + w + e.pad_after;
         }
@@ -878,7 +1041,7 @@ struct EnhancedFeaturesRuntime::Impl {
         const std::int32_t height = static_cast<std::int32_t>(std::ceil(20.0f * scale));
         const std::int32_t x = screen_w - static_cast<std::int32_t>(std::ceil(10.0f * scale)) - width;
         const std::int32_t y = static_cast<std::int32_t>(std::ceil(10.0f * scale));
-        const std::int32_t text_h = ui::measure_text(queue, u"0", 8).y;
+        const std::int32_t text_h = wm_text_h;
         const float factor = (dpi_idx == 0) ? 0.4f : 0.5f;
         const std::int32_t base_text_y =
             y + static_cast<std::int32_t>(std::floor(static_cast<float>(height - text_h) * factor));
@@ -886,7 +1049,7 @@ struct EnhancedFeaturesRuntime::Impl {
         draw_fade_banner(queue, x, y, width, height, 1.0f);
 
         std::int32_t pen_x = x + padding;
-        for (const auto& e : elems) {
+        for (const auto& e : wm_elems) {
             const std::int32_t w = (e.clip_w > 0) ? std::min(e.clip_w, e.full_w) : e.full_w;
             if (!e.text.empty() && w > 0) {
                 queue.text(pen_x + e.off_x, base_text_y + e.off_y, e.color, e.flags, e.clip_w,
@@ -1096,6 +1259,7 @@ void EnhancedFeaturesRuntime::on_player_hurt(events::GameEventReader& event,
                 {utf8_to_u16(std::to_string(hp_i)), true},
                 {u" health remaining)", false},
             };
+            it->measured_dpi_idx = -1;
             it->time = now;
             return;
         }
@@ -1174,6 +1338,7 @@ void EnhancedFeaturesRuntime::on_item_purchase(events::GameEventReader& event,
             if (!updated)
                 it->meta.purchases.push_back({key, {format_weapon_purchase_name(key), 1}});
             it->parts = build_parts(player_name, it->meta);
+            it->measured_dpi_idx = -1;
             it->time = now;
             it->reveal_started = now;
             DEBUG_LOG("HITLOG", "purchase %s bought %s", player_name.c_str(), key.c_str());
@@ -1192,6 +1357,7 @@ void EnhancedFeaturesRuntime::on_item_purchase(events::GameEventReader& event,
 void EnhancedFeaturesRuntime::on_round_prestart() {
     std::lock_guard lock(impl_->mutex);
     impl_->banners.clear();
+    impl_->has_banners.store(false, std::memory_order_release);
     impl_->fire_cache.clear();
     impl_->recent_native_hits.clear();
 }
@@ -1215,7 +1381,7 @@ void EnhancedFeaturesRuntime::render_hud(ui::RenderQueue& queue) {
 
     if (sw > 0 && sh > 0)
         impl_->render_custom_scope(queue, sw, sh);
-    impl_->render_hitlogs(queue, scale, idx == 0);
+    impl_->render_hitlogs(queue, scale, idx);
     if (sw > 0 && sh > 0) {
         impl_->render_unsafe_dt_warning(queue, sw, sh, scale);
         impl_->render_watermark(queue, sw, sh, scale, idx);
@@ -1300,6 +1466,7 @@ void record_native_aim_hit(std::int32_t id, std::int32_t target, std::int32_t hi
         if (it->meta.kind == BannerMeta::Kind::gun_hurt && it->meta.entity == target &&
             it->meta.total_damage == damage && (now - it->meta.updated) <= 0.6f) {
             it->parts = std::move(parts);
+            it->measured_dpi_idx = -1;
             it->accent_abgr = impl.b.hitlogs.hit_color.value;
             it->time = now;
             it->reveal_from = 0.0f;

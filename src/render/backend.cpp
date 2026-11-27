@@ -35,6 +35,9 @@ template <class T> T read(std::span<const std::byte> bytes, std::size_t offset =
 }
 
 RendererBackend::RendererBackend(IDirect3DDevice9* device) : device_(device) {
+    scratch_points_.reserve(128);
+    scratch_vertices_.reserve(512);
+    scratch_text_.reserve(256);
     create_menu_background(*this);
 }
 RendererBackend::~RendererBackend() {
@@ -48,7 +51,7 @@ void RendererBackend::wait_for_render() {
     rendering_.store(false, std::memory_order_release);
 }
 
-// 433E9B63: dynamic default-pool buffer, 1024 vertices per growth.
+// 433E9B63: dynamic default-pool buffer, 1024 vertices per growth (starts at 4096 to avoid initial stalls).
 HRESULT RendererBackend::lock_buffer() {
     std::uint32_t bytes = capacity_ * sizeof(RenderVertex);
     if (!buffer_ || grow_) {
@@ -56,6 +59,8 @@ HRESULT RendererBackend::lock_buffer() {
             grow_ = false;
             bytes += 0x6000;
         }
+        if (!buffer_ && bytes < 4096u * sizeof(RenderVertex))
+            bytes = 4096u * sizeof(RenderVertex);
         IDirect3DVertexBuffer9* next = nullptr;
         const auto result =
             device_->CreateVertexBuffer(bytes, 0x208, 0x142, D3DPOOL_DEFAULT, &next, nullptr);
@@ -64,6 +69,7 @@ HRESULT RendererBackend::lock_buffer() {
         if (buffer_)
             buffer_->Release();
         buffer_ = next;
+        stream_bound_ = false;
         capacity_ = bytes / sizeof(RenderVertex);
     }
     const auto result = buffer_->Lock(
@@ -100,7 +106,10 @@ bool RendererBackend::prepare(D3DPRIMITIVETYPE primitive, IDirect3DBaseTexture9*
 // Raw unconnected strips retain their original four-vertex format. Rectangle,
 // texture and text commands write quads as triangle lists so they can batch.
 void RendererBackend::draw(std::uint32_t count, std::uint32_t first) {
-    device_->SetStreamSource(0, buffer_, 0, sizeof(RenderVertex));
+    if (!stream_bound_) {
+        device_->SetStreamSource(0, buffer_, 0, sizeof(RenderVertex));
+        stream_bound_ = true;
+    }
     if (primitive_ == D3DPT_TRIANGLESTRIP && !connected_) {
         for (std::uint32_t at = 0; at < count; at += 4)
             device_->DrawPrimitive(D3DPT_TRIANGLESTRIP, first + at, 2);
@@ -268,6 +277,8 @@ std::array<std::int32_t, 4> RendererBackend::get_bounds() const { // 43368A1E
             subtract(rectangle.bottom, rectangle.top)};
 }
 bool RendererBackend::is_bounds_reset() const { // 433EB732
+    if (scissor_known_)
+        return scissor_enabled_;
     DWORD enabled = 0;
     device_->GetRenderState(D3DRS_SCISSORTESTENABLE, &enabled);
     return enabled != 0;
@@ -277,6 +288,8 @@ void RendererBackend::reset_bounds(bool enabled) { // 433ED99E
         flush();
         device_->SetRenderState(D3DRS_SCISSORTESTENABLE, enabled);
     }
+    scissor_enabled_ = enabled;
+    scissor_known_ = true;
 }
 void RendererBackend::set_alpha(float value) { // 433AEA69
     // Native minimum_number/maximum_number select the numeric operand for NaN.
@@ -346,10 +359,10 @@ void RendererBackend::consume(std::span<const std::byte> commands) { // 4338AD28
             const auto count = read<std::uint32_t>(payload, 4);
             if (std::uint64_t(count) * 8 + 8 > payload.size())
                 throw std::invalid_argument("Truncated polyline");
-            std::vector<LinePoint> points(count);
+            scratch_points_.resize(count);
             if (count)
-                std::memcpy(points.data(), payload.data() + 8, count * 8);
-            polyline(points, read<std::uint32_t>(payload));
+                std::memcpy(scratch_points_.data(), payload.data() + 8, count * 8);
+            polyline(scratch_points_, read<std::uint32_t>(payload));
             break;
         }
         case 6:
@@ -360,13 +373,13 @@ void RendererBackend::consume(std::span<const std::byte> commands) { // 4338AD28
             const auto count = read<std::uint32_t>(payload);
             if (std::uint64_t(count) * 12 + 4 > payload.size())
                 throw std::invalid_argument("Truncated colored vertices");
-            std::vector<ColoredVertex> values(count);
+            scratch_vertices_.resize(count);
             if (count)
-                std::memcpy(values.data(), payload.data() + 4, count * 12);
+                std::memcpy(scratch_vertices_.data(), payload.data() + 4, count * 12);
             if (header >> 27 == 7)
-                triangle_list(values);
+                triangle_list(scratch_vertices_);
             else
-                triangle_strip(values);
+                triangle_strip(scratch_vertices_);
             break;
         }
         case 9:
@@ -376,12 +389,12 @@ void RendererBackend::consume(std::span<const std::byte> commands) { // 4338AD28
             const auto count = read<std::uint16_t>(payload, 20);
             if (std::size_t(count) * 2 + 22 > payload.size())
                 throw std::invalid_argument("Truncated text");
-            std::u16string value(count, u'\0');
+            scratch_text_.resize(count);
             if (count)
-                std::memcpy(value.data(), payload.data() + 22, count * 2);
+                std::memcpy(scratch_text_.data(), payload.data() + 22, count * 2);
             text(read<std::int32_t>(payload), read<std::int32_t>(payload, 4),
                  read<std::uint32_t>(payload, 8), read<std::uint32_t>(payload, 12),
-                 read<std::int32_t>(payload, 16), value);
+                 read<std::int32_t>(payload, 16), scratch_text_);
             break;
         }
         case 11:
@@ -406,10 +419,10 @@ void RendererBackend::consume(std::span<const std::byte> commands) { // 4338AD28
             const auto count = read<std::uint32_t>(payload, 4);
             if (std::uint64_t(count) * 12 + 8 > payload.size())
                 throw std::invalid_argument("Truncated primitive vertices");
-            std::vector<ColoredVertex> values(count);
+            scratch_vertices_.resize(count);
             if (count)
-                std::memcpy(values.data(), payload.data() + 8, count * 12);
-            colored_primitives(read<std::uint32_t>(payload), values);
+                std::memcpy(scratch_vertices_.data(), payload.data() + 8, count * 12);
+            colored_primitives(read<std::uint32_t>(payload), scratch_vertices_);
             break;
         }
         default:

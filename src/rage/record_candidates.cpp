@@ -375,6 +375,7 @@ std::vector<std::int32_t> collect_target_record_ticks(const client::CommandFrame
                                                       std::uint32_t maximum,
                                                       const RecordCandidateBindings& bindings) {
     std::vector<std::int32_t> output;
+    output.reserve(16);
     append_target_record_ticks(frame, target, player, maximum, bindings, output);
     return output;
 }

@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <immintrin.h>
+#include <vector>
 
 namespace skeet::esp::grenade_live_detail {
 template <class T> T field(const void* object, std::ptrdiff_t offset) {
@@ -48,6 +49,10 @@ struct GrenadeLiveScene::Storage {
     EngineGrenades& raw;
     GrenadeLiveOffsets offsets;
     GrenadeAuxiliaryLiveContext auxiliary_context;
+    std::vector<std::uint32_t> smoke_handles;
+    std::vector<Vector3> molotov_cells;
+    std::int32_t last_entity_scan_tick = -1000;
+    std::int32_t last_smoke_scan_tick = -1000;
     explicit Storage(const GrenadeLiveBindings&);
     bool enemy(void*) const;
     bool game_flag(std::ptrdiff_t) const;

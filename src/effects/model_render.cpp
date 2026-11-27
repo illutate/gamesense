@@ -659,9 +659,19 @@ void ModelRenderRuntime::apply_gated_player(void* studio, const ModelDrawState& 
 }
 void ModelRenderRuntime::draw_model(void* studio, const ModelDrawArguments& args,
                                     const ModelDrawFrame& frame) {
+    if (frame.suppress_effects || read<std::int32_t>(studio, 0x260) == 2 ||
+        (args.flags & 0x204) ||
+        !(settings.player.enabled.value || settings.player.behind_wall.value ||
+          settings.teammate.enabled.value || settings.teammate.behind_wall.value ||
+          settings.local_player.enabled.value || settings.local_fake.enabled.value ||
+          settings.on_shot.enabled.value || settings.hands.enabled.value ||
+          settings.weapon_viewmodel.enabled.value || settings.weapons.enabled.value ||
+          settings.shadow.value)) {
+        original_draw(studio, args);
+        return;
+    }
     const auto saved = save_state(studio);
-    if (!frame.suppress_effects && read<std::int32_t>(studio, 0x260) != 2 &&
-        !(args.flags & 0x204)) {
+    {
         const auto category = classify(args.info, frame.classification);
         if (draw_viewmodel(studio, args, category) ||
             draw_weapon(studio, args, category, frame.entities))
@@ -722,7 +732,7 @@ void ModelRenderRuntime::draw_model(void* studio, const ModelDrawArguments& args
                     }
                 }
             }
-        } else if (frame.shot_entity_handle != UINT32_MAX) {
+        } else if (settings.on_shot.enabled.value && frame.shot_entity_handle != UINT32_MAX) {
             auto* marker = invoke<void*>(frame.entities.entity_list, 4, frame.shot_entity_handle);
             if (marker && renderable == invoke<void*>(marker, 5)) {
                 if (frame.shot)

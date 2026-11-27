@@ -27,38 +27,43 @@ void draw_esp_frame(ui::RenderQueue& queue, EspFrameOwner& owner, std::int32_t& 
     if (!initial_view)
         return;
     const auto game_mode = c.entities.game_type();
-    if (game_mode == 6 && c.world_config.danger_zone_items.value)
+    const bool danger_zone_active = (game_mode == 6 && c.world_config.danger_zone_items.value != 0);
+    if (danger_zone_active)
         reset_danger_zone_models(owner.entity_models);
-    WorldEntityScan collected;
-    std::array<WorldEntity, 65> dropped_entities;
-    const auto highest = c.entities.highest_entity_index();
-    const auto world_maximum_players = c.entities.maximum_players();
-    for (auto index = world_maximum_players + 1; index < highest; ++index) {
-        if (std::uint32_t(index) & 0xFFFF0000u)
-            continue;
-        auto* entity = c.entities.by_index(index);
-        if (!entity)
-            continue;
-        if (c.entities.dormant(entity))
-            continue;
-        const auto class_index = c.entities.client_class_index(entity);
-        const bool registered = class_index < owner.class_handlers.size() &&
-                                owner.class_handlers[class_index] != EntityOverlayHandler::none;
-        if (registered) {
-            const auto handler = owner.class_handlers[class_index];
-            c.entities.dispatch(queue, owner, cursor, c, *initial_view, entity, handler);
-            continue;
+    const auto scan_options = std::uint32_t(c.world_config.dropped_weapons.value);
+    const bool scan_world =
+        scan_options != 0 || c.world_config.hostages.enabled.value != 0 ||
+        c.world_config.bomb.enabled.value != 0 || c.grenade_config.entities.value != 0 ||
+        danger_zone_active;
+    if (scan_world) {
+        WorldEntityScan collected;
+        std::array<WorldEntity, 65> dropped_entities;
+        const auto highest = c.entities.highest_entity_index();
+        const auto world_maximum_players = c.entities.maximum_players();
+        for (auto index = world_maximum_players + 1; index < highest; ++index) {
+            if (std::uint32_t(index) & 0xFFFF0000u)
+                continue;
+            auto* entity = c.entities.by_index(index);
+            if (!entity)
+                continue;
+            if (c.entities.dormant(entity))
+                continue;
+            const auto class_index = c.entities.client_class_index(entity);
+            const bool registered = class_index < owner.class_handlers.size() &&
+                                    owner.class_handlers[class_index] != EntityOverlayHandler::none;
+            if (registered) {
+                const auto handler = owner.class_handlers[class_index];
+                c.entities.dispatch(queue, owner, cursor, c, *initial_view, entity, handler);
+                continue;
+            }
+            if (scan_options)
+                c.entities.collect_dropped(collected, dropped_entities, entity, index, scan_options,
+                                           owner, c);
         }
-        const auto scan_options = std::uint32_t(c.world_config.dropped_weapons.value);
-        // This branch already captured an absent class handler. The native
-        // owner has no deferred specialized vector and does not look it up
-        // again after the IsWeapon engine call.
-        c.entities.collect_dropped(collected, dropped_entities, entity, index, scan_options, owner,
-                                   c);
+        draw_dropped_entities(queue, collected, c.world_config, c.dropped, c.entities);
+        draw_danger_zone_models(queue, c.draw.projection, game_mode,
+                                c.world_config.danger_zone_items.value, owner.entity_models);
     }
-    draw_dropped_entities(queue, collected, c.world_config, c.dropped, c.entities);
-    draw_danger_zone_models(queue, c.draw.projection, game_mode,
-                            c.world_config.danger_zone_items.value, owner.entity_models);
     const auto maximum_players = c.players.maximum_players();
     for (std::int32_t slot = 1; slot < maximum_players; ++slot) {
         const bool blocked =

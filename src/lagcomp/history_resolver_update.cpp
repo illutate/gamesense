@@ -286,6 +286,9 @@ void choose_resolver_yaw(client::PlayerState& owner, void* player, void* animati
                            : std::uint8_t(!(state.flags & 4u)) + 1;
             update_inline_feedback(owner, player, mode, span, flags, scratch, bindings);
             if (use_prior && mode > 0 && mode < 3) {
+                if (bindings.configuration.resolver_reworked() && state.resolver_status == 1 &&
+                    resolver_runtime::detect_jitter_oscillation(owner.history, input.maximum_yaw))
+                    state.resolver_status = 0;
                 auto& decision = evidence.decision;
                 if (state.resolver_status != 0) {
                     decision = state.resolver_status == 1   ? JitterDecision::environment

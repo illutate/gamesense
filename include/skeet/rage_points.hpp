@@ -27,6 +27,10 @@ std::vector<RageAimPoint> generate_rage_regular_points(const RagePointGeneration
 // Same native body for one index of the traversal. The scanner uses this to
 // insert that hitbox's resolver-intersection candidates before the next index.
 // An index outside the actual model count contributes no regular points.
+void append_rage_regular_hitbox_points(std::vector<RageAimPoint>& result,
+                                       const RagePointGeneration&, std::uint32_t hitbox_index,
+                                       std::span<const RageLocalHitbox>,
+                                       std::span<const RageScanHitbox>);
 std::vector<RageAimPoint> generate_rage_regular_hitbox_points(const RagePointGeneration&,
                                                               std::uint32_t hitbox_index,
                                                               std::span<const RageLocalHitbox>,

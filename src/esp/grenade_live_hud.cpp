@@ -4,6 +4,7 @@
 #include "skeet/misc/grenade_command.hpp"
 #include "skeet/client/command_recapture.hpp"
 #include "skeet/render/backend.hpp"
+#include <algorithm>
 #include <vector>
 
 namespace skeet::esp {
@@ -24,33 +25,55 @@ void GrenadeLiveScene::Storage::draw_warnings(ui::RenderQueue& queue,
             return;
     }
     if (config.smoke_area.value && raw.bindings().entity_list && raw.bindings().smoke_projectile_class) {
-        const auto highest =
-            std::clamp(engine::invoke<std::int32_t>(raw.bindings().entity_list, 6), 64, 4096);
-        for (std::int32_t ent_idx = 65; ent_idx <= highest; ++ent_idx) {
-            auto* entity = raw.by_index(ent_idx);
-            if (!entity || raw.dormant(entity) || (field<std::uint32_t>(entity, o.effects) & 0x20u))
-                continue;
-            if (raw.client_class(entity) != raw.bindings().smoke_projectile_class)
-                continue;
-            if (!field<std::uint8_t>(entity, o.smoke_active))
-                continue;
-            const float tick_interval = b.queries.environment().tick_interval;
-            const float now =
-                (float(b.tick_count) * tick_interval - tick_interval) + b.interpolation * tick_interval;
-            const auto start_tick = field<std::int32_t>(entity, o.smoke_start_tick);
-            float smoke_fade = 1.0f;
-            if (start_tick > 0) {
-                const float age = std::max(0.0f, now - float(start_tick) * tick_interval);
-                smoke_fade =
-                    std::min(std::clamp(age / 0.25f, 0.0f, 1.0f), std::clamp((18.0f - age) / 1.0f, 0.0f, 1.0f));
+        const bool need_smoke_refresh =
+            (b.tick_count - last_smoke_scan_tick >= 16) || (b.tick_count < last_smoke_scan_tick);
+        if (need_smoke_refresh &&
+            ((b.tick_count - last_entity_scan_tick >= 16) ||
+             (b.tick_count < last_entity_scan_tick))) {
+            last_smoke_scan_tick = b.tick_count;
+            const auto highest =
+                std::clamp(engine::invoke<std::int32_t>(raw.bindings().entity_list, 6), 64, 4096);
+            for (std::int32_t ent_idx = 65; ent_idx <= highest; ++ent_idx) {
+                auto* entity = raw.by_index(ent_idx);
+                if (!entity || raw.dormant(entity) ||
+                    (field<std::uint32_t>(entity, o.effects) & 0x20u) ||
+                    raw.client_class(entity) != raw.bindings().smoke_projectile_class)
+                    continue;
+                const auto handle = *engine::invoke<const std::uint32_t*>(entity, 2);
+                if (handle != 0xffffffffu &&
+                    std::find(smoke_handles.begin(), smoke_handles.end(), handle) ==
+                        smoke_handles.end())
+                    smoke_handles.push_back(handle);
             }
-            draw_smoke_area(queue, config, b.projection, field<Vector3>(entity, o.origin),
-                            smoke_fade);
+        }
+        const float tick_interval = b.queries.environment().tick_interval;
+        const float now =
+            (float(b.tick_count) * tick_interval - tick_interval) + b.interpolation * tick_interval;
+        for (std::size_t i = 0; i < smoke_handles.size();) {
+            auto* entity = raw.by_handle(smoke_handles[i]);
+            if (!entity || raw.dormant(entity) ||
+                (field<std::uint32_t>(entity, o.effects) & 0x20u) ||
+                raw.client_class(entity) != raw.bindings().smoke_projectile_class) {
+                smoke_handles[i] = smoke_handles.back();
+                smoke_handles.pop_back();
+                continue;
+            }
+            if (field<std::uint8_t>(entity, o.smoke_active)) {
+                const auto start_tick = field<std::int32_t>(entity, o.smoke_start_tick);
+                float smoke_fade = 1.0f;
+                if (start_tick > 0) {
+                    const float age = std::max(0.0f, now - float(start_tick) * tick_interval);
+                    smoke_fade = std::min(std::clamp(age / 0.25f, 0.0f, 1.0f),
+                                          std::clamp((18.0f - age) / 1.0f, 0.0f, 1.0f));
+                }
+                draw_smoke_area(queue, config, b.projection, field<Vector3>(entity, o.origin),
+                                smoke_fade);
+            }
+            ++i;
         }
     }
     if (!config.proximity_warning.value && !config.molotov_area.value)
         return;
-    std::vector<Vector3> molotov_cells;
     for (auto& record : warnings.records) {
         auto* entity = record.handle == 0xffffffffu ? nullptr : raw.by_handle(record.handle);
         if (!entity || (field<std::uint32_t>(entity, o.effects) & 0x20u)) {

@@ -105,8 +105,10 @@ int EntityModule::get_players(void* state) {
     }
     auto* const local = bindings_.local_player ? *bindings_.local_player : nullptr;
     const bool enemies = arguments > 0 && lua().type(state, 1) == 1 && lua().toboolean(state, 1);
-    std::vector<std::int16_t> found;
-    for (std::int32_t index = 1; index <= *bindings_.max_players; ++index) {
+    std::array<std::int16_t, 64> found{};
+    std::size_t found_count = 0;
+    const auto limit = std::min<std::int32_t>(*bindings_.max_players, 64);
+    for (std::int32_t index = 1; index <= limit; ++index) {
         auto* value = entity(std::uint32_t(index));
         if (!value || !engine::invoke<bool>(value, 158) ||
             read<std::uint8_t>(value, bindings_.offsets.life_state) ||
@@ -116,13 +118,12 @@ int EntityModule::get_players(void* state) {
         if (enemies && (read<std::uint8_t>(value, bindings_.offsets.enemy_excluded) || !local ||
                         !enemy(value, false)))
             continue;
-        found.push_back(std::int16_t(index));
+        found[found_count++] = std::int16_t(index);
     }
-    lua().createtable(state, static_cast<int>(found.size()), 0);
-    int index = 0;
-    for (auto value : found) {
-        lua().pushinteger(state, value);
-        lua().rawseti(state, -2, ++index);
+    lua().createtable(state, static_cast<int>(found_count), 0);
+    for (std::size_t i = 0; i < found_count; ++i) {
+        lua().pushinteger(state, found[i]);
+        lua().rawseti(state, -2, static_cast<int>(i + 1));
     }
     return 1;
 }

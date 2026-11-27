@@ -59,6 +59,9 @@ struct FontRuntime::Impl {
     bool initialized = false;
     std::array<std::uint32_t, 2048> coverage{};
     std::unordered_map<char16_t, GlyphRecord> records;
+    std::array<GlyphRecord, 256> fast_records{};
+    std::array<std::atomic<std::uint8_t>, 256> fast_state{};
+    std::atomic<std::int32_t> fast_atlas_height{0};
     std::vector<std::uint32_t> pixels;
     mutable SRWLOCK lock = SRWLOCK_INIT;
     std::atomic_bool dirty = false;
@@ -78,7 +81,17 @@ struct FontRuntime::Impl {
     bool failed(char16_t character) noexcept {
         const auto c = static_cast<std::uint16_t>(character);
         coverage[c >> 5] &= ~(std::uint32_t(1) << (c & 31));
+        if (c < 256)
+            fast_state[c].store(2, std::memory_order_release);
         return false;
+    }
+    void publish_glyph(char16_t character, const GlyphRecord& rec) {
+        records.emplace(character, rec);
+        const auto c = static_cast<std::uint16_t>(character);
+        if (c < 256) {
+            fast_records[c] = rec;
+            fast_state[c].store(1, std::memory_order_release);
+        }
     }
     void reserve_glyph(std::int32_t width) {
         if (x + width >= atlas_width) {
@@ -89,6 +102,7 @@ struct FontRuntime::Impl {
             const auto height = atlas_height ? atlas_height * 2 : atlas_width;
             pixels.resize(static_cast<std::size_t>(atlas_width) * height);
             atlas_height = height;
+            fast_atlas_height.store(height, std::memory_order_release);
         }
     }
     void outline(std::int32_t width) {
@@ -159,9 +173,9 @@ struct FontRuntime::Impl {
                            x + column] =
                         value ? 0x00ffffffu | (std::min(std::uint32_t(value) * 4, 255u) << 24) : 0;
                 }
-            records.emplace(character, GlyphRecord{float(x), float(y), float(x + width),
-                                                   float(y + line_height), gm.gmptGlyphOrigin.x,
-                                                   gm.gmCellIncX - gm.gmptGlyphOrigin.x});
+            publish_glyph(character, GlyphRecord{float(x), float(y), float(x + width),
+                                                 float(y + line_height), gm.gmptGlyphOrigin.x,
+                                                 gm.gmCellIncX - gm.gmptGlyphOrigin.x});
             x += width;
         } else {
             if (!abc.abcA && !abc.abcB && !abc.abcC)
@@ -192,9 +206,9 @@ struct FontRuntime::Impl {
             }
             if (flags & 4)
                 outline(width);
-            records.emplace(character, GlyphRecord{float(x), float(y), float(x + width),
-                                                   float(y + line_height), abc.abcA,
-                                                   static_cast<std::int32_t>(abc.abcB) + abc.abcC});
+            publish_glyph(character, GlyphRecord{float(x), float(y), float(x + width),
+                                                 float(y + line_height), abc.abcA,
+                                                 static_cast<std::int32_t>(abc.abcB) + abc.abcC});
             x += width;
         }
         dirty.store(true, std::memory_order_seq_cst);
@@ -286,11 +300,23 @@ bool FontRuntime::valid() const noexcept {
     return impl_->initialized;
 }
 bool FontRuntime::supports(char16_t c) const noexcept {
+    const auto code = static_cast<std::uint16_t>(c);
+    if (code < 256) {
+        const auto st = impl_->fast_state[code].load(std::memory_order_acquire);
+        if (st != 0)
+            return st == 1;
+    }
     SharedGlyphLock lock(impl_->lock);
     return impl_->covered(c);
 }
 bool FontRuntime::prepare(char16_t c) {
     auto& state = *impl_;
+    const auto code = static_cast<std::uint16_t>(c);
+    if (code < 256) {
+        const auto st = state.fast_state[code].load(std::memory_order_acquire);
+        if (st != 0)
+            return st == 1;
+    }
     {
         SharedGlyphLock lock(state.lock);
         if (state.records.contains(c))
@@ -302,11 +328,32 @@ bool FontRuntime::prepare(char16_t c) {
     return state.create_glyph(c);
 }
 void FontRuntime::prepare(std::u16string_view text) {
-    for (auto c : text)
+    auto& state = *impl_;
+    for (auto c : text) {
+        const auto code = static_cast<std::uint16_t>(c);
+        if (code < 256 && state.fast_state[code].load(std::memory_order_acquire) != 0)
+            continue;
         prepare(c);
+    }
 }
 bool FontRuntime::glyph(char16_t c, GlyphImage& out) const noexcept { // 43386484
     const auto& state = *impl_;
+    const auto code = static_cast<std::uint16_t>(c);
+    if (code < 256) {
+        const auto st = state.fast_state[code].load(std::memory_order_acquire);
+        if (st == 1) {
+            const auto& g = state.fast_records[code];
+            const auto h = state.fast_atlas_height.load(std::memory_order_acquire);
+            const float inv_w = 1.0f / float(state.atlas_width);
+            const float inv_h = h ? (1.0f / float(h)) : 0.0f;
+            out = {g.left,        g.top,         g.right,       g.bottom,
+                   g.left * inv_w, g.top * inv_h, g.right * inv_w, g.bottom * inv_h,
+                   g.first,       g.second};
+            return true;
+        }
+        if (st == 2)
+            return false;
+    }
     SharedGlyphLock lock(state.lock);
     const auto found = state.records.find(c);
     if (found == state.records.end())

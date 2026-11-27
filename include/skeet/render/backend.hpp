@@ -2,6 +2,7 @@
 #include "skeet/render_queue.hpp"
 #include <d3d9.h>
 #include <span>
+#include <string>
 #include <vector>
 #include <atomic>
 
@@ -43,7 +44,12 @@ public:
         return device_;
     }
     void set_device(IDirect3DDevice9* device) noexcept {
-        device_ = device;
+        if (device_ != device) {
+            device_ = device;
+            stream_bound_ = false;
+            scissor_known_ = false;
+            caps_device_ = nullptr;
+        }
     } // 433874F9
     std::uint32_t vertex_capacity() const noexcept {
         return capacity_;
@@ -136,6 +142,11 @@ private:
     std::uint32_t capacity_ = 0, count_ = 0, first_ = 0;
     D3DPRIMITIVETYPE primitive_ = D3DPT_TRIANGLESTRIP;
     bool connected_ = false, grow_ = false;
+    bool stream_bound_ = false;
+    bool scissor_known_ = false, scissor_enabled_ = false;
+    IDirect3DDevice9* caps_device_ = nullptr;
+    bool caps_alpha_cmp_ = false;
+    DWORD caps_max_anisotropy_ = 1;
     float alpha_ = 1.0f, depth_ = 0.5f;
     IDirect3DBaseTexture9* texture_ = nullptr;
     IDirect3DBaseTexture9* saved_texture_ = nullptr;
@@ -148,6 +159,9 @@ private:
     };
     const FontTexture* font_texture(const FontLink&) const noexcept;
     std::vector<FontTexture> font_textures_;
+    std::vector<LinePoint> scratch_points_;
+    std::vector<ColoredVertex> scratch_vertices_;
+    std::u16string scratch_text_;
     std::atomic_bool rendering_{false};
 };
 

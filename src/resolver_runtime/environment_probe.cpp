@@ -135,14 +135,33 @@ EnvironmentProbe probe_environment(const RageVector& local_origin, const RageVec
             break;
         offset += 32.0f;
     }
-    if (result.damage[0] == result.damage[1])
+    struct SideChoice {
+        bool selected;
+        bool negate_direction;
+    };
+    const auto select_environment_side = [&](std::int32_t d0, std::int32_t d1) noexcept -> SideChoice {
+        if (d0 == d1)
+            return {false, false};
+        if (d1 == 0)
+            return {true, true};
+        if (d0 == 0)
+            return {true, false};
+        if (!engine.reworked())
+            return {false, false};
+        const auto hi = std::max(d0, d1);
+        const auto lo = std::min(d0, d1);
+        // Behind penetrable cover, accept only a clear damage asymmetry (>=2x and >=15 dmg).
+        if (hi < lo * 2 || (hi - lo) < 15)
+            return {false, false};
+        return {true, d1 < d0};
+    };
+    const auto choice = select_environment_side(result.damage[0], result.damage[1]);
+    if (!choice.selected)
         return result;
     result.direction = perpendicular(horizontal);
-    if (result.damage[1] == 0)
+    if (choice.negate_direction)
         for (auto& value : result.direction)
             value = -value;
-    else if (result.damage[0] != 0)
-        return result;
     result.selected = true;
     return result;
 }

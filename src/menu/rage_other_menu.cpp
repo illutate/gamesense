@@ -19,10 +19,19 @@ constexpr Requirement requirements[] = {
     {0x2B385DC7, ConfigType::integer}, {0x141C9037, ConfigType::boolean},
     {0xEC178029, ConfigType::hotkey},  {0x4F67FC33, ConfigType::integer},
     {0xC9FCBE4B, ConfigType::color},   {0x4CB8E4AA, ConfigType::integer},
+    {0x8C2E9D71u, ConfigType::boolean},
     {rage::experimental_rage_hash, ConfigType::boolean},
     {rage::experimental_rage_option_hashes[std::size_t(rage::ExperimentalRageOption::animation)],
      ConfigType::boolean},
+    {rage::experimental_rage_option_hashes[std::size_t(rage::ExperimentalRageOption::resolver)],
+     ConfigType::boolean},
+    {rage::experimental_rage_option_hashes[std::size_t(rage::ExperimentalRageOption::records)],
+     ConfigType::boolean},
     {rage::experimental_rage_option_hashes[std::size_t(rage::ExperimentalRageOption::extrapolated_pose)],
+     ConfigType::boolean},
+    {rage::experimental_rage_option_hashes[std::size_t(rage::ExperimentalRageOption::damage)],
+     ConfigType::boolean},
+    {rage::experimental_rage_option_hashes[std::size_t(rage::ExperimentalRageOption::hitchance)],
      ConfigType::boolean},
 };
 }
@@ -103,18 +112,27 @@ RageOtherMenu::RageOtherMenu(Tab& tab, ConfigRegistries& settings, WidgetIdentit
     mitigations.add_option("Disable hitbox: feet", 0x10);
     mitigations.add_option("Lower hit chance precision", 0x40);
     mitigations.add_option("Limit targets per tick", 0x80);
-    auto& experimental = checkbox(rage::experimental_rage_hash, u"Experimental RAGE");
-    experimental.color = 0xBB82F0F0;
-    experimental.set_visible(false);
+    struct HiddenControl {
+        std::uint32_t hash;
+        std::u16string_view label;
+    };
     using Option = rage::ExperimentalRageOption;
     constexpr auto& hashes = rage::experimental_rage_option_hashes;
-    auto& animation = checkbox(hashes[std::size_t(Option::animation)], u"Animation rebuild");
-    animation.color = 0xBB82F0F0u;
-    animation.set_visible(false);
-    auto& extrapolation = checkbox(hashes[std::size_t(Option::extrapolated_pose)],
-                                   u"Extrapolated pose rebuild");
-    extrapolation.color = 0xBB82F0F0u;
-    extrapolation.set_visible(false);
+    constexpr std::array hidden_controls{
+        HiddenControl{0x8C2E9D71u, u"Jitter fix"},
+        HiddenControl{rage::experimental_rage_hash, u"Experimental RAGE"},
+        HiddenControl{hashes[std::size_t(Option::animation)], u"Animation rebuild"},
+        HiddenControl{hashes[std::size_t(Option::resolver)], u"Resolver rebuild"},
+        HiddenControl{hashes[std::size_t(Option::records)], u"Record validation"},
+        HiddenControl{hashes[std::size_t(Option::extrapolated_pose)], u"Extrapolated pose rebuild"},
+        HiddenControl{hashes[std::size_t(Option::damage)], u"Damage model"},
+        HiddenControl{hashes[std::size_t(Option::hitchance)], u"Full-seed hitchance"},
+    };
+    for (const auto& control : hidden_controls) {
+        auto& item = checkbox(control.hash, control.label);
+        item.color = 0xBB82F0F0u;
+        item.set_visible(false);
+    }
 }
 RageOtherMenu::~RageOtherMenu() {
     std::erase(tab_.categories, &category_);

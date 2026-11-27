@@ -38,6 +38,9 @@ void RendererBackend::release_device_objects() { // 433C9479
         buffer_->Release();
         buffer_ = nullptr;
     }
+    stream_bound_ = false;
+    scissor_known_ = false;
+    caps_device_ = nullptr;
     if (saved_texture_) {
         saved_texture_->Release();
         saved_texture_ = nullptr;
@@ -150,9 +153,25 @@ bool RendererBackend::begin_frame() { // 433C95CE, D3D setup after cache uploads
     if (!screen_width || !screen_height)
         return false;
     rendering_.store(true, std::memory_order_release);
-    D3DCAPS9 caps{};
-    device_->GetDeviceCaps(&caps);
-    if (caps.AlphaCmpCaps & 0x10) {
+    stream_bound_ = false;
+    {
+        DWORD scissor = 0;
+        if (SUCCEEDED(device_->GetRenderState(D3DRS_SCISSORTESTENABLE, &scissor))) {
+            scissor_enabled_ = (scissor != 0);
+            scissor_known_ = true;
+        } else {
+            scissor_known_ = false;
+        }
+    }
+    if (caps_device_ != device_) {
+        D3DCAPS9 caps{};
+        if (SUCCEEDED(device_->GetDeviceCaps(&caps))) {
+            caps_alpha_cmp_ = (caps.AlphaCmpCaps & 0x10) != 0;
+            caps_max_anisotropy_ = caps.MaxAnisotropy;
+            caps_device_ = device_;
+        }
+    }
+    if (caps_alpha_cmp_) {
         device_->SetRenderState(static_cast<D3DRENDERSTATETYPE>(27), 1);
         device_->SetRenderState(static_cast<D3DRENDERSTATETYPE>(24), 1);
         device_->SetRenderState(static_cast<D3DRENDERSTATETYPE>(15), 1);
@@ -170,7 +189,7 @@ bool RendererBackend::begin_frame() { // 433C95CE, D3D setup after cache uploads
         device_->SetTextureStageState(state[0], static_cast<D3DTEXTURESTAGESTATETYPE>(state[1]),
                                       state[2]);
     const DWORD sampler_states[][3]{
-        {0, 6, 2}, {0, 5, 2}, {0, 9, 0}, {0, 8, 0}, {0, 10, caps.MaxAnisotropy},
+        {0, 6, 2}, {0, 5, 2}, {0, 9, 0}, {0, 8, 0}, {0, 10, caps_max_anisotropy_},
         {0, 1, 1}, {0, 2, 1}, {1, 1, 1}, {1, 2, 1}};
     for (const auto& state : sampler_states)
         device_->SetSamplerState(state[0], static_cast<D3DSAMPLERSTATETYPE>(state[1]), state[2]);
@@ -211,6 +230,8 @@ void RendererBackend::end_frame() { // 4337EF22
         saved_texture_->Release();
         saved_texture_ = nullptr;
     }
+    scissor_known_ = false;
+    stream_bound_ = false;
     rendering_.store(false, std::memory_order_release);
 }
 

@@ -95,14 +95,15 @@ void Category::draw(RenderQueue& queue, Point origin, std::uint32_t accent) cons
     auto metric_title = title;
     if (const auto zero = metric_title.find(char16_t(0)); zero != metric_title.npos)
         metric_title = metric_title.substr(0, zero);
+    Point title_size{};
     if (titled) { // 0x4334AF01
         queue.rectangle({add(position.x, 2), add(position.y, 2), sub(b.width, 3), sub(b.height, 3),
                          background});
         queue.rectangle({position.x, position.y, 10, 1, outer_border});
         queue.rectangle({add(position.x, 1), add(position.y, 1), 9, 1, border});
-        const auto size = measure_text(queue, metric_title, text_flags);
-        const auto right_x = add(add(position.x, 17), size.x),
-                   right_width = sub(sub(b.width, size.x), 16);
+        title_size = measure_text(queue, metric_title, text_flags);
+        const auto right_x = add(add(position.x, 17), title_size.x),
+                   right_width = sub(sub(b.width, title_size.x), 16);
         queue.rectangle({right_x, position.y, right_width, 1, outer_border});
         queue.rectangle({right_x, add(position.y, 1), right_width, 1, border});
         queue.rectangle({position.x, position.y, 1, b.height, outer_border});
@@ -121,8 +122,7 @@ void Category::draw(RenderQueue& queue, Point origin, std::uint32_t accent) cons
                          background});
     }
     if (titled) {
-        const auto size = measure_text(queue, metric_title, text_flags);
-        queue.text(add(position.x, 14), sub(position.y, size.y / 2),
+        queue.text(add(position.x, 14), sub(position.y, title_size.y / 2),
                    drag_state == 1 ? accent : title_color, text_flags, 0, title);
         if (!scroll.enabled && resizable) {
             const auto x = add(sub(position.x, 1), b.width), y = add(sub(position.y, 1), b.height);

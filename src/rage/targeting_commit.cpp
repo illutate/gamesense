@@ -740,30 +740,30 @@ TargetShotChoice select_target_for_shot(TargetBatch& batch,
     for (std::size_t i = 0; i != batch.count; ++i) {
         auto& candidate = *batch.candidates[i];
         float chance = 1.0f;
-        if (experimental || (context_flags & 0x10U)) {
-            const auto& evaluation = evaluations[i];
-            const auto evaluate = [&] {
-                return evaluate_target_hitchance(*evaluation.context, candidate, *evaluation.record,
-                                                 evaluation.minimum_damage,
-                                                 evaluation.minimum_chance, chance);
-            };
-            if (!evaluate()) {
-                if (!(weapon_flags & 0x400U) || !(candidate.flags & 8U))
-                    continue;
-                candidate.flags &= ~8U;
-                candidate.primary = candidate.alternate_first;
-                if (!evaluate()) {
-                    if (!(candidate.flags & 0x10U))
-                        continue;
-                    candidate.flags &= ~0x10U;
-                    candidate.primary = candidate.alternate_second;
-                    if (!evaluate())
-                        continue;
-                }
+        const bool check_chance = experimental || (context_flags & 0x10U);
+        const auto try_point = [&](const TargetPoint& point) {
+            candidate.primary = point;
+            chance = 1.0f;
+            if (check_chance &&
+                !evaluate_target_hitchance(*evaluations[i].context, candidate, *evaluations[i].record,
+                                           evaluations[i].minimum_damage,
+                                           evaluations[i].minimum_chance, chance))
+                return false;
+            const auto effective =
+                (candidate.primary.flags & 0x20U) ? chance * point_penalty : chance;
+            return !(chance_floor >= effective);
+        };
+        const TargetPoint saved_primary = candidate.primary;
+        bool accepted = try_point(saved_primary);
+        if (!accepted && check_chance && (weapon_flags & 0x400U) && (candidate.flags & 8U)) {
+            candidate.flags &= ~8U;
+            accepted = try_point(candidate.alternate_first);
+            if (!accepted && (candidate.flags & 0x10U)) {
+                candidate.flags &= ~0x10U;
+                accepted = try_point(candidate.alternate_second);
             }
         }
-        const auto effective = (candidate.primary.flags & 0x20U) ? chance * point_penalty : chance;
-        if (!(chance_floor >= effective)) {
+        if (accepted) {
             candidate.primary.chance = chance;
             return {&candidate, i};
         }

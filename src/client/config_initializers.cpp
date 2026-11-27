@@ -24,6 +24,8 @@ void feature_indicators(void* context) { //434909F8, descriptor43468B84
 void anti_aim_correction(void* context) { //43490A1A, descriptor4346753C
     auto& source = bindings(context);
     append(source, source.rage.anti_aim_correction);
+    append(source, source.rage.jitter_fix);
+    source.rage.jitter_fix.value = 1;
     append(source, source.rage.experimental_rage);
     source.rage.experimental_rage.value = 1;
     for (const auto option : rage::active_experimental_rage_options)

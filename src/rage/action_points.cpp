@@ -17,6 +17,7 @@ std::vector<Point> points(const client::CommandFrame& frame,
                                          bindings.preamble.weapon_settings.minimum_hit_chance.value,
                                          (bindings.state.flags & 4U) != 0};
     std::vector<Point> result;
+    result.reserve(16);
     if (safe) {
         const auto center = rage_point_detail::midpoint(geometry.primary[index].capsule);
         std::array<Matrix3x4, 3> matrices;
